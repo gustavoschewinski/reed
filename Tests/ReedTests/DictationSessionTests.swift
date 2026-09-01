@@ -51,6 +51,12 @@ private final class FakeClipboard: ClipboardStore, @unchecked Sendable {
     func restore(_ items: [NSPasteboardItem]) {}
 }
 
+@MainActor
+private final class FakeCuePlayer {
+    var played: [DictationCue] = []
+    func play(_ cue: DictationCue) { played.append(cue) }
+}
+
 /// Returns scripted passes in order — the pattern from
 /// `StreamingTranscriberTests.swift`. Content doesn't need to be realistic:
 /// `finish()`'s fallback path calls `transcribe` regardless of how much
@@ -105,6 +111,66 @@ private actor OverlapDetectingTranscriber: Transcriber {
     }
 }
 
+/// A delay that keeps a `transcribe` call genuinely in flight regardless of
+/// whether the *caller's* Task gets cancelled mid-wait. A bare `try? await
+/// Task.sleep(...)` is itself cancellation-aware and is invoked as part of
+/// the calling Task's chain — so once that Task is cancelled (as
+/// `cancel()` cancels the pass loop), the sleep throws almost immediately
+/// and `try?` swallows it, resolving this call far sooner than `duration`
+/// and collapsing the very race window these tests need to hold open. A
+/// freshly spawned `Task` has its own, independent cancellation state, so
+/// awaiting its `.value` genuinely waits out the full duration.
+private func uncancellableDelay(_ duration: Duration) async {
+    let sleeper = Task { try? await Task.sleep(for: duration) }
+    await sleeper.value
+}
+
+/// Delays before returning, so a caller can assert something about the
+/// world while this call is still in flight — even across a `cancel()` of
+/// whichever Task issued it.
+private actor DelayedTranscriber: Transcriber {
+    private let delay: Duration
+    private let text: String
+
+    init(delay: Duration, text: String = "stale preview text") {
+        self.delay = delay
+        self.text = text
+    }
+
+    func prepare() async throws {}
+
+    func transcribe(_ samples: [Float], timeOffset: Double) async throws -> TranscriptionPass {
+        await uncancellableDelay(delay)
+        return TranscriptionPass(text: text, words: [], confidence: 1.0)
+    }
+}
+
+/// Records the order in which calls *finish* (not the order they start),
+/// with the first call held open by `firstCallDelay` — immune to the
+/// issuing Task's cancellation, see `uncancellableDelay` — so a caller can
+/// arrange for a second call to be issued while it's still in flight, and
+/// confirm whether the second call was actually issued before the first
+/// completed.
+private actor OrderingTranscriber: Transcriber {
+    private(set) var completionOrder: [Int] = []
+    private var callIndex = 0
+    private let firstCallDelay: Duration
+
+    init(firstCallDelay: Duration) { self.firstCallDelay = firstCallDelay }
+
+    func prepare() async throws {}
+
+    func transcribe(_ samples: [Float], timeOffset: Double) async throws -> TranscriptionPass {
+        callIndex += 1
+        let myIndex = callIndex
+        if myIndex == 1 {
+            await uncancellableDelay(firstCallDelay)
+        }
+        completionOrder.append(myIndex)
+        return TranscriptionPass(text: "pass \(myIndex)", words: [], confidence: 1.0)
+    }
+}
+
 // MARK: - Helper
 
 @MainActor
@@ -119,12 +185,14 @@ private func makeSession(
     clipboard: FakeClipboard = FakeClipboard(),
     canPaste: Bool = true,
     paste: (() -> Void)? = nil,
-    passInterval: Duration = .milliseconds(5)
+    passInterval: Duration = .milliseconds(5),
+    cuePlayer: FakeCuePlayer? = nil
 ) throws -> DictationSession {
     let store = try store ?? TranscriptStore(inMemory: true)
     let settings = settings ?? Settings(defaults: UserDefaults(suiteName: UUID().uuidString)!)
     let backing = transcriber ?? ScriptedTranscriber(passes: passes)
     let streaming = StreamingTranscriber(transcriber: backing)
+    let cuePlayer = cuePlayer ?? FakeCuePlayer()
 
     return DictationSession(
         recorder: recorder,
@@ -136,7 +204,8 @@ private func makeSession(
         clipboard: clipboard,
         canPaste: canPaste,
         paste: paste ?? {},
-        passInterval: passInterval
+        passInterval: passInterval,
+        playCue: cuePlayer.play
     )
 }
 
@@ -507,4 +576,190 @@ final class StateBox {
 
     session.cancel()
     #expect(session.previewText.isEmpty)
+}
+
+// MARK: - level resets on every exit (Finding 1)
+
+@MainActor
+@Test func levelResetsToZeroAfterCancel() async throws {
+    let recorder = FakeRecorder()
+    let session = try makeSession(recorder: recorder)
+
+    session.begin()
+    recorder.onLevel?(0.75)
+    #expect(session.level == 0.75)
+
+    session.cancel()
+    #expect(session.level == 0)
+}
+
+@MainActor
+@Test func levelResetsToZeroAfterEnd() async throws {
+    let recorder = FakeRecorder()
+    let session = try makeSession(recorder: recorder, passes: [pass("hi")])
+
+    session.begin()
+    recorder.onLevel?(0.5)
+    #expect(session.level == 0.5)
+
+    await session.end()?.value
+    #expect(session.level == 0)
+}
+
+// MARK: - a stale pass cannot repopulate previewText after cancel (Finding 2)
+
+/// Starts a pass that is still in flight when `cancel()` runs, then lets it
+/// actually complete, and confirms it never wrote its (now stale) result
+/// into `previewText`. Fails against a `runPassLoop` that checks
+/// `Task.isCancelled` only at the top of the loop (i.e. after the write),
+/// since the pass here is already inside `transcribe` — past that check —
+/// when `cancel()` runs.
+@MainActor
+@Test func cancelDoesNotLetAStalePassRepopulatePreviewText() async throws {
+    let recorder = FakeRecorder()
+    let transcriber = DelayedTranscriber(delay: .milliseconds(60))
+    let session = try makeSession(recorder: recorder, transcriber: transcriber, passInterval: .milliseconds(5))
+
+    session.begin()
+    recorder.onSamples?([Float](repeating: 0.1, count: 20_000))
+
+    // The loop's first pass should have started almost immediately and now
+    // be asleep inside the 60ms delay.
+    try await Task.sleep(for: .milliseconds(20))
+    session.cancel()
+    #expect(session.previewText.isEmpty)
+
+    // Let the in-flight pass actually finish.
+    try await Task.sleep(for: .milliseconds(100))
+    #expect(session.previewText.isEmpty)
+}
+
+// MARK: - cancel-then-begin cannot let a stale pass touch the fresh recording (Finding 3)
+
+/// `OrderingTranscriber`'s first call sleeps long enough to still be running
+/// when `cancel()` fires and a new `begin()` follows immediately. Without
+/// `begin()` awaiting the previous pass loop before calling
+/// `transcriber.begin()`, the second recording's loop would issue its own
+/// call while the first is still asleep — actor reentrancy lets the second,
+/// non-sleeping call finish first, recording completion order `[2, 1]`. With
+/// the fix, the second call can't even be issued until the first has fully
+/// finished, so the order must be `[1, 2]`.
+@MainActor
+@Test func cancelThenImmediateBeginDoesNotLetAStalePassRace() async throws {
+    let recorder = FakeRecorder()
+    let transcriber = OrderingTranscriber(firstCallDelay: .milliseconds(80))
+    let session = try makeSession(recorder: recorder, transcriber: transcriber, passInterval: .milliseconds(5))
+
+    session.begin()
+    recorder.onSamples?([Float](repeating: 0.1, count: 20_000))
+    // Give the loop a moment to actually issue its first call and enter the
+    // artificial delay, then cancel and immediately start a new recording.
+    try await Task.sleep(for: .milliseconds(15))
+    session.cancel()
+    session.begin()
+    recorder.onSamples?([Float](repeating: 0.1, count: 20_000))
+
+    // Long enough for both calls to have completed either way.
+    try await Task.sleep(for: .milliseconds(200))
+    session.cancel()
+
+    // Only the relative order of the first two calls is load-bearing here —
+    // recording 2's loop keeps running for the rest of the 200ms window and
+    // racks up further calls (3, 4, ...), which is expected and irrelevant.
+    let order = await transcriber.completionOrder
+    #expect(order.count >= 2)
+    #expect(Array(order.prefix(2)) == [1, 2])
+}
+
+// MARK: - Cues get a seam, gated by playSounds (Finding 4)
+
+@MainActor
+@Test func playSoundsTrueFiresTheCuesOnBeginCancelAndEnd() async throws {
+    let player = FakeCuePlayer()
+    let session = try makeSession(passes: [pass("hi")], cuePlayer: player)
+
+    session.begin()
+    #expect(player.played == [.start])
+
+    await session.end()?.value
+    #expect(player.played == [.start, .stop])
+}
+
+@MainActor
+@Test func playSoundsTrueFiresTheCancelCue() async throws {
+    let player = FakeCuePlayer()
+    let session = try makeSession(cuePlayer: player)
+
+    session.begin()
+    session.cancel()
+    #expect(player.played == [.start, .cancel])
+}
+
+@MainActor
+@Test func playSoundsFalseFiresNoCues() async throws {
+    let defaults = UserDefaults(suiteName: UUID().uuidString)!
+    let settings = Settings(defaults: defaults)
+    settings.playSounds = false
+    let player = FakeCuePlayer()
+    let session = try makeSession(settings: settings, passes: [pass("hi")], cuePlayer: player)
+
+    session.begin()
+    await session.end()?.value
+    #expect(player.played.isEmpty)
+}
+
+// MARK: - a throwing recorder.start() still tears down cleanly (Finding 5)
+
+@MainActor
+@Test func throwingRecorderStartLeavesStateIdleAndUnwindsMuteAndMediaPause() async throws {
+    struct StartFailed: Error {}
+    let media = FakeMediaControl()
+    let volume = FakeVolumeControl()
+    let recorder = FakeRecorder()
+    recorder.startError = StartFailed()
+    let session = try makeSession(media: media, volume: volume, recorder: recorder)
+
+    session.begin()
+
+    #expect(session.state == .idle)
+    #expect(media.pauses == 1)
+    #expect(media.resumes == 1)
+    #expect(volume.mutes == 1)
+    #expect(volume.restores == 1)
+}
+
+// MARK: - cancel works during transcribing too (Ruling)
+
+@MainActor
+@Test func cancelDuringTranscribingDeliversNothingAndStoresNothing() async throws {
+    let store = try TranscriptStore(inMemory: true)
+    let clipboard = FakeClipboard()
+    clipboard.string = "untouched"
+    let transcriber = DelayedTranscriber(delay: .milliseconds(60), text: "should never land anywhere")
+    let session = try makeSession(store: store, transcriber: transcriber, clipboard: clipboard)
+
+    session.begin()
+    let task = session.end()
+    #expect(session.state == .transcribing)
+
+    session.cancel()  // escape, mid-transcription
+    await task?.value
+
+    #expect(session.state == .idle)
+    #expect(store.all().isEmpty)
+    #expect(clipboard.string == "untouched")
+}
+
+@MainActor
+@Test func cancelDuringTranscribingPlaysTheCancelCue() async throws {
+    let player = FakeCuePlayer()
+    let transcriber = DelayedTranscriber(delay: .milliseconds(60))
+    let session = try makeSession(transcriber: transcriber, cuePlayer: player)
+
+    session.begin()
+    let task = session.end()
+    session.cancel()
+    await task?.value
+
+    #expect(player.played == [.start, .cancel])
 }

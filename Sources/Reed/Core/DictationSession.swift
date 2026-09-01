@@ -32,6 +32,14 @@ protocol VolumeControl: AnyObject {
 
 extension SystemAudio: VolumeControl {}
 
+/// One of the three short cue sounds `DictationSession` plays. A seam so
+/// tests can verify the `playSounds` gate without ever invoking `NSSound`.
+enum DictationCue: Sendable, Equatable {
+    case start
+    case stop
+    case cancel
+}
+
 /// Turns a hotkey gesture into text in the focused app: records, streams the
 /// transcription live, and delivers the final result.
 ///
@@ -55,10 +63,14 @@ final class DictationSession: ObservableObject {
     private let canPaste: Bool?
     private let paste: (() -> Void)?
     private let passInterval: Duration
+    private let playCue: (DictationCue) -> Void
 
     /// Drives `StreamingTranscriber.runPassIfDue()`. Exactly one pass is ever
     /// in flight: the loop awaits each pass to completion before deciding
     /// whether to sleep, rather than firing on a bare repeating timer.
+    ///
+    /// Also doubles as the handle a fresh `begin()` awaits before it lets a
+    /// new pass loop touch the transcriber — see `begin()`.
     private var passLoopTask: Task<Void, Never>?
 
     /// Samples handed to us by `Recorder.onSamples` since the last time they
@@ -85,6 +97,10 @@ final class DictationSession: ObservableObject {
     /// media, restore volume — run exactly once no matter how many exit
     /// paths call it.
     private var teardownRan = true
+    /// Set by `cancel()` when it lands during `.transcribing`. Checked once,
+    /// right before `completeEnd()` would deliver or store — not a new
+    /// state, just a discard flag on the result that's already in flight.
+    private var discardResult = false
 
     init(
         recorder: any AudioRecording,
@@ -96,7 +112,14 @@ final class DictationSession: ObservableObject {
         clipboard: any ClipboardStore = SystemClipboard(),
         canPaste: Bool? = nil,
         paste: (() -> Void)? = nil,
-        passInterval: Duration = .seconds(1)
+        passInterval: Duration = .seconds(1),
+        playCue: @escaping (DictationCue) -> Void = { cue in
+            switch cue {
+            case .start: Cues.start()
+            case .stop: Cues.stop()
+            case .cancel: Cues.cancel()
+            }
+        }
     ) {
         self.recorder = recorder
         self.transcriber = transcriber
@@ -108,6 +131,7 @@ final class DictationSession: ObservableObject {
         self.canPaste = canPaste
         self.paste = paste
         self.passInterval = passInterval
+        self.playCue = playCue
 
         recorder.onLevel = { [weak self] level in self?.level = level }
         recorder.onSamples = { [weak self] samples in
@@ -137,6 +161,7 @@ final class DictationSession: ObservableObject {
         previewText = ""
         level = 0
         teardownRan = false
+        discardResult = false
         recordingStartedAt = .now
 
         didMute = settings.muteWhileRecording
@@ -152,27 +177,48 @@ final class DictationSession: ObservableObject {
             return
         }
 
-        if settings.playSounds { Cues.start() }
+        if settings.playSounds { playCue(.start) }
         state = .recording
 
+        // A pass from the just-ended previous recording can still be in
+        // flight on `transcriber` (cancelling `passLoopTask` only sets a
+        // flag; it doesn't abort a suspended call). Awaiting it here, before
+        // ever calling `transcriber.begin()`, guarantees that reset — and
+        // everything after it — never races a stale call still touching the
+        // actor. `completeEnd()` already awaits its own pass loop before
+        // touching the actor further, so the only carry-over case is a
+        // recording ended via `cancel()`, which does not await.
+        let previousLoop = passLoopTask
         passLoopTask = Task { [weak self] in
             guard let self else { return }
+            await previousLoop?.value
             await self.transcriber.begin()
             await self.runPassLoop()
         }
     }
 
-    /// Recording → idle immediately. Delivers nothing, stores nothing.
+    /// `.recording` → idle immediately: delivers nothing, stores nothing.
+    /// `.transcribing` → still walks to idle once `completeEnd()` finishes,
+    /// but discards whatever it produces rather than delivering or storing
+    /// it — pressing escape during a slow `finish()` must not paste anyway.
     func cancel() {
-        guard state == .recording else { return }
-        defer { teardown() }
+        switch state {
+        case .recording:
+            defer { teardown() }
+            passLoopTask?.cancel()
+            pendingSamples = []
+            previewText = ""
+            if settings.playSounds { playCue(.cancel) }
+            state = .idle
 
-        passLoopTask?.cancel()
-        passLoopTask = nil
-        pendingSamples = []
-        previewText = ""
-        if settings.playSounds { Cues.cancel() }
-        state = .idle
+        case .transcribing:
+            guard !discardResult else { return }
+            discardResult = true
+            if settings.playSounds { playCue(.cancel) }
+
+        case .idle, .delivering:
+            break
+        }
     }
 
     /// `.holdEnd` (and `.tap` from recording, via `toggle()`): recording →
@@ -223,7 +269,7 @@ final class DictationSession: ObservableObject {
         do {
             let text = try await transcriber.finish()
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else {
+            guard !discardResult, !trimmed.isEmpty else {
                 previewText = ""
                 state = .idle
                 return
@@ -235,7 +281,7 @@ final class DictationSession: ObservableObject {
             let duration = recordingStartedAt.map { Date().timeIntervalSince($0) } ?? 0
             store.add(text: trimmed, duration: duration)
 
-            if settings.playSounds { Cues.stop() }
+            if settings.playSounds { playCue(.stop) }
         } catch {
             NSLog("Reed: transcription failed: %@", String(describing: error))
         }
@@ -246,7 +292,9 @@ final class DictationSession: ObservableObject {
 
     /// The single teardown path every exit from `.recording` — normal,
     /// cancelled, or a thrown transcriber error — passes through. Resumes
-    /// media, restores volume, and stops the recorder, exactly once: a
+    /// media, restores volume, stops the recorder, and resets `level` back
+    /// to 0 (nothing else would: `Recorder.stop()` removes the tap, so no
+    /// further `onLevel` calls will ever arrive to do it), exactly once: a
     /// second call (from a redundant `defer`, say) is a guarded no-op.
     @discardableResult
     private func teardown() -> [Float] {
@@ -256,6 +304,7 @@ final class DictationSession: ObservableObject {
         let recorded = recorder.stop()
         if didPauseMedia { mediaControl.resume() }
         if didMute { volumeControl.restore() }
+        level = 0
         return recorded
     }
 
@@ -277,11 +326,14 @@ final class DictationSession: ObservableObject {
                 appendedSampleCount += samples.count
             }
 
-            if let text = await transcriber.runPassIfDue() {
-                previewText = text
-            }
-
+            let text = await transcriber.runPassIfDue()
+            // Checked before publishing: `cancel()` clears `previewText`
+            // synchronously but does not await this loop, so a pass that was
+            // already in flight at that moment must not resurrect stale text
+            // into a session that is now idle (or, worse, already recording
+            // something new) once it finally resumes.
             guard !Task.isCancelled else { return }
+            if let text { previewText = text }
 
             let elapsed = ContinuousClock.now - iterationStart
             let remaining = passInterval - elapsed
