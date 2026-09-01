@@ -248,6 +248,21 @@ final class DictationSession: ObservableObject {
         }
     }
 
+    /// Called from `AppDelegate.applicationWillTerminate` (Item 1) — the
+    /// process is moments from exiting, on a normal Quit. Unlike `cancel()`
+    /// or `end()`, this makes no attempt to finish a pass, deliver text, or
+    /// play a cue: there is no time left, and none of that is what a
+    /// terminating app owes the user. It only runs `teardown()`, whose
+    /// `guard !teardownRan` makes this a safe no-op if nothing was ever
+    /// started (idle) or it already ran (a normal `end()`/`cancel()` got
+    /// there first) — restoring the output volume and resuming media is
+    /// the one thing that matters here, since leaving either broken is
+    /// silent and outlives the app.
+    func prepareForTermination() {
+        passLoopTask?.cancel()
+        teardown()
+    }
+
     // MARK: - Recording lifecycle
 
     private func completeEnd() async {

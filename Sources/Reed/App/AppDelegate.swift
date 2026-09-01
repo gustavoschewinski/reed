@@ -44,6 +44,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var onboardingWindow: NSWindow?
 
     override init() {
+        // Item 1: must run before anything in this launch ever calls
+        // `SystemAudio.mute()` (the `session` constructed a few lines down
+        // is the only thing that ever does). If the previous run died
+        // mid-recording — a crash, a force-quit, a logout — with the
+        // output still muted and no `applicationWillTerminate` to catch
+        // it, this is what notices and restores it.
+        SystemAudio.restoreLeftoverMuteIfNeeded()
+
         let settings = Settings()
         let store = AppDelegate.makeStore()
         let transcriber = ParakeetTranscriber()
@@ -59,6 +67,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             settings: settings
         )
         super.init()
+    }
+
+    /// Item 1 (ship blocker): the one code path that runs on a normal Quit
+    /// — one click from the menu bar, mid-recording, mutes the machine
+    /// forever without it. `session.prepareForTermination()` unwinds every
+    /// side effect `begin()` may have started (chiefly the output mute)
+    /// synchronously, with no attempt to finish a pass or delivery — there
+    /// is no time left for that, and nothing here needs to succeed at
+    /// transcribing, only at not leaving the Mac silent.
+    ///
+    /// This does NOT cover a crash, force-quit, or logout: none of those
+    /// call `applicationWillTerminate` at all. That case is handled
+    /// separately, at the next launch — see `SystemAudio
+    /// .restoreLeftoverMuteIfNeeded()`, called before this run's own
+    /// `session` (and the `SystemAudio` it owns) can mute anything.
+    func applicationWillTerminate(_ notification: Notification) {
+        session.prepareForTermination()
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {

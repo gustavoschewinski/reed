@@ -493,6 +493,47 @@ final class StateBox {
     #expect(volume.restores == 1)
 }
 
+// MARK: - prepareForTermination (Item 1)
+
+@MainActor
+@Test func prepareForTerminationRestoresVolumeAndResumesMediaWhileRecording() async throws {
+    let media = FakeMediaControl()
+    let volume = FakeVolumeControl()
+    let session = try makeSession(media: media, volume: volume)
+
+    session.begin()
+    session.prepareForTermination()
+
+    #expect(media.resumes == 1)
+    #expect(volume.restores == 1)
+}
+
+@MainActor
+@Test func prepareForTerminationIsANoOpWhenIdle() async throws {
+    let media = FakeMediaControl()
+    let volume = FakeVolumeControl()
+    let session = try makeSession(media: media, volume: volume)
+
+    session.prepareForTermination()
+
+    #expect(media.resumes == 0)
+    #expect(volume.restores == 0)
+}
+
+@MainActor
+@Test func prepareForTerminationAfterANormalEndDoesNotDoubleRestore() async throws {
+    let media = FakeMediaControl()
+    let volume = FakeVolumeControl()
+    let session = try makeSession(media: media, volume: volume, passes: [pass("done")])
+
+    session.begin()
+    await session.end()?.value
+    session.prepareForTermination()
+
+    #expect(media.resumes == 1)
+    #expect(volume.restores == 1)
+}
+
 // MARK: - toggle
 
 @MainActor
