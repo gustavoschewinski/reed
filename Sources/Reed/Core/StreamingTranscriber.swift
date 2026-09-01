@@ -19,6 +19,8 @@ actor StreamingTranscriber {
     /// Samples already discarded from the front, so absolute times stay correct.
     private var trimmedSamples = 0
     private(set) var confirmedSegments = 0
+    /// So the tail-cap warning below logs once per recording, not once per tick.
+    private var loggedTailCapped = false
 
     /// Parakeet rejects very short inputs; below this a pass is skipped.
     private var minimumSamples: Int { Int(0.3 * reedSampleRate) }
@@ -37,6 +39,7 @@ actor StreamingTranscriber {
         wholeRecording = []
         trimmedSamples = 0
         confirmedSegments = 0
+        loggedTailCapped = false
         engine.reset()
     }
 
@@ -53,12 +56,26 @@ actor StreamingTranscriber {
         let total = trimmedSamples + buffer.count
         guard total >= minimumSamples else { return nil }
 
-        let seekTime = engine.hypothesisStartTime > 0
-            ? engine.hypothesisStartTime
-            : engine.confirmedEndTime
-        let seekSample = max(0, Int(seekTime * reedSampleRate))
-        let relative = max(0, seekSample - trimmedSamples)
+        let relative = seekRelative(total: total, context: "runPassIfDue")
         guard relative < buffer.count else { return nil }
+
+        // Every pass appends trailing silence before transcribing, and the
+        // model can place a hallucinated word's timing inside that pad —
+        // which would make the tail look larger than it really is. Cap
+        // against the real, un-padded tail so a single bad timestamp can't
+        // turn a normal-cost pass into one that blows past the tick interval.
+        let tailSamples = buffer.count - relative
+        let maxTailSamples = Int(config.maxUnconfirmedTailSeconds * reedSampleRate)
+        guard tailSamples <= maxTailSamples else {
+            if !loggedTailCapped {
+                loggedTailCapped = true
+                NSLog(
+                    "Reed: unconfirmed tail exceeded %.0fs; suspending the live preview for "
+                        + "the rest of this recording. The final transcript is unaffected.",
+                    config.maxUnconfirmedTailSeconds)
+            }
+            return nil
+        }
 
         let slice = Array(buffer[relative...])
         guard slice.count >= minimumSamples else { return nil }
@@ -95,15 +112,14 @@ actor StreamingTranscriber {
             return result.text.trimmingCharacters(in: .whitespacesAndNewlines)
         }
 
-        let seekTime = engine.hypothesisStartTime > 0
-            ? engine.hypothesisStartTime
-            : engine.confirmedEndTime
-        let relative = max(0, Int(seekTime * reedSampleRate) - trimmedSamples)
+        let total = trimmedSamples + buffer.count
+        let relative = seekRelative(total: total, context: "finish")
 
         var tail = ""
         if relative < buffer.count {
             let slice = Array(buffer[relative...])
-            let result = try await transcriber.transcribe(slice + silencePad, timeOffset: seekTime)
+            let offset = Double(trimmedSamples + relative) / reedSampleRate
+            let result = try await transcriber.transcribe(slice + silencePad, timeOffset: offset)
             tail = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
         }
 
@@ -112,8 +128,53 @@ actor StreamingTranscriber {
             .joined(separator: " ")
     }
 
+    /// Where, within `buffer`, the next pass (or the finishing tail pass)
+    /// should start reading from.
+    ///
+    /// The engine's seek time (`hypothesisStartTime`, falling back to
+    /// `confirmedEndTime`) is normally trustworthy, but every pass appends
+    /// trailing silence before transcribing, and the model can place a word's
+    /// timing inside that pad — reporting a seek time beyond any audio we
+    /// actually recorded. Trusting that value would compute a `relative`
+    /// past the end of `buffer`, silently skipping (or, in `trimConfirmedAudio`,
+    /// permanently discarding) real, never-transcribed audio. When the seek
+    /// time exceeds `total` — the real audio actually appended — the seek is
+    /// untrustworthy, so this falls back to 0: treat everything still in
+    /// `buffer` as unconfirmed, rather than skip any of it.
+    private func seekRelative(total: Int, context: String) -> Int {
+        let seekTime = engine.hypothesisStartTime > 0
+            ? engine.hypothesisStartTime
+            : engine.confirmedEndTime
+        let seekSample = max(0, Int(seekTime * reedSampleRate))
+
+        guard seekSample > total else {
+            return max(0, seekSample - trimmedSamples)
+        }
+
+        NSLog(
+            "Reed: %@ saw a seek time of %.2fs beyond the %.2fs of audio actually recorded; "
+                + "treating the whole buffer as unconfirmed instead of skipping it.",
+            context, seekTime, Double(total) / reedSampleRate)
+        return 0
+    }
+
     private func trimConfirmedAudio() {
+        let totalAudio = trimmedSamples + buffer.count
         let cut = max(0, Int(engine.hypothesisStartTime * reedSampleRate))
+
+        // See seekRelative's comment: a hallucinated word inside the trailing
+        // silence pad can report a time beyond real audio. Trimming to it
+        // would discard the entire buffer as "processed" even though it was
+        // never transcribed — so when that happens, skip the trim entirely
+        // rather than clamp it, which would produce the same data loss.
+        guard cut <= totalAudio else {
+            NSLog(
+                "Reed: hypothesisStartTime (%.2fs) exceeds the %.2fs of audio actually recorded; "
+                    + "skipping this trim to avoid discarding untranscribed audio.",
+                engine.hypothesisStartTime, Double(totalAudio) / reedSampleRate)
+            return
+        }
+
         let amount = min(cut - trimmedSamples, buffer.count)
         guard amount > 0 else { return }
         buffer.removeFirst(amount)

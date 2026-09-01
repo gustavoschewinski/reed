@@ -50,6 +50,10 @@ struct AgreementConfig: Sendable {
     var boundaryWordCount: Int = 3
     var trailingSilenceSeconds: Double = 1.0
     var minConfirmedSegmentsToTrustStreaming: Int = 3
+    /// Beyond this much unconfirmed audio, preview passes are skipped rather than
+    /// run at a cost that exceeds the tick interval. The final transcription is
+    /// unaffected: finish() falls back to a batch pass over the whole recording.
+    var maxUnconfirmedTailSeconds: Double = 15.0
 }
 
 struct AgreementResult: Sendable, Equatable {
