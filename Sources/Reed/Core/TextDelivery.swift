@@ -1,11 +1,11 @@
 import AppKit
-// `kAXTrustedCheckOptionPrompt` is imported as a global `var`, which Swift 6
-// strict concurrency would otherwise flag as shared mutable state; it is a
-// read-only system constant, so importing it `@preconcurrency` is safe.
-@preconcurrency import ApplicationServices
+import ApplicationServices
 
 protocol Pasteboard: AnyObject {
     var string: String? { get set }
+    /// Every item currently on the pasteboard, in every type it was offered in.
+    func snapshot() -> [NSPasteboardItem]
+    func restore(_ items: [NSPasteboardItem])
 }
 
 final class SystemPasteboard: Pasteboard {
@@ -14,6 +14,28 @@ final class SystemPasteboard: Pasteboard {
         set {
             NSPasteboard.general.clearContents()
             if let newValue { NSPasteboard.general.setString(newValue, forType: .string) }
+        }
+    }
+
+    func snapshot() -> [NSPasteboardItem] {
+        // `clearContents()` invalidates the items vended by the system
+        // pasteboard, so each one must be copied — a fresh item with every
+        // type's data re-set — before we write over it.
+        (NSPasteboard.general.pasteboardItems ?? []).map { item in
+            let copy = NSPasteboardItem()
+            for type in item.types {
+                if let data = item.data(forType: type) {
+                    copy.setData(data, forType: type)
+                }
+            }
+            return copy
+        }
+    }
+
+    func restore(_ items: [NSPasteboardItem]) {
+        NSPasteboard.general.clearContents()
+        if !items.isEmpty {
+            NSPasteboard.general.writeObjects(items)
         }
     }
 }
@@ -42,14 +64,14 @@ enum TextDelivery {
             return
         }
 
-        let previous = pasteboard.string
+        let previous = pasteboard.snapshot()
         pasteboard.string = trimmed
         paste()
 
         // The paste is asynchronous in the receiving app; restoring immediately
         // would race it.
         try? await Task.sleep(for: restoreAfter)
-        pasteboard.string = previous
+        pasteboard.restore(previous)
     }
 
     static func pressCommandV() {
@@ -66,7 +88,10 @@ enum TextDelivery {
     }
 
     static func requestAccessibility() {
-        let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue()
-        _ = AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
+        // The literal has been the stable public value of
+        // `kAXTrustedCheckOptionPrompt` for over a decade; using it directly
+        // avoids referencing that global `var`, which Swift 6 strict
+        // concurrency flags as shared mutable state.
+        _ = AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary)
     }
 }
