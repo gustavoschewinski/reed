@@ -1,0 +1,8 @@
+.DS_Store
+.build/
+*.xcuserstate
+Reed.app/
+*.dmg
+
+# working docs — locais, fora do repo
+docs/superpowers/
