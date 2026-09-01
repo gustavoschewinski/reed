@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import CoreAudio
 import Foundation
 import Testing
@@ -227,7 +228,12 @@ private func makeSession(
     paste: (() -> Void)? = nil,
     passInterval: Duration = .milliseconds(5),
     cuePlayer: FakeCuePlayer? = nil,
-    microphonePermissionDenied: Bool? = nil
+    // Defaults to `.authorized` (not nil/"ask the real system") so every
+    // test in this file that doesn't care about authorization gets a
+    // session that behaves as if the mic were already granted — `swift
+    // test` must never depend on (or be blocked by) the real, ambient
+    // authorization state of whatever machine runs it.
+    microphoneAuthorizationOverride: AVAuthorizationStatus? = .authorized
 ) throws -> DictationSession {
     let store = try store ?? TranscriptStore(inMemory: true)
     let settings = settings ?? Settings(defaults: FakeUserDefaults())
@@ -247,7 +253,7 @@ private func makeSession(
         paste: paste ?? {},
         passInterval: passInterval,
         playCue: cuePlayer.play,
-        microphonePermissionDenied: microphonePermissionDenied
+        microphoneAuthorizationOverride: microphoneAuthorizationOverride
     )
 }
 
@@ -895,18 +901,42 @@ final class StateBox {
     #expect(session.problem == nil)
 }
 
+/// A denied (or restricted) microphone must be caught *before* `begin()`
+/// ever calls `recorder.start()` — not attempted-and-recovered. `startCount
+/// == 0` is the assertion that actually discriminates this from the old
+/// behaviour: comment out the authorization guard in `begin()` and this
+/// still passes on `problem != nil` (the post-`start()` catch would still
+/// set one) but fails on `startCount == 0`, because the fake would have
+/// been asked to start and thrown.
 @MainActor
-@Test func deniedMicrophoneSetsAnExplanatoryProblemAndNeverEntersRecording() async throws {
-    struct StartFailed: Error {}
+@Test func deniedMicrophoneSetsAnExplanatoryProblemAndNeverCallsStart() async throws {
     let recorder = FakeRecorder()
-    recorder.startError = StartFailed()
-    let session = try makeSession(recorder: recorder, microphonePermissionDenied: true)
+    let session = try makeSession(recorder: recorder, microphoneAuthorizationOverride: .denied)
 
     session.begin()
 
     #expect(session.state == .idle)
+    #expect(recorder.startCount == 0)
     #expect(session.problem != nil)
     #expect(session.problem?.contains("microphone") == true || session.problem?.contains("Microphone") == true)
+}
+
+/// `.notDetermined` (never asked) is not the same as `.denied` (said no) —
+/// both block recording, but the sentence has to differ, since "turn it
+/// back on" is wrong for someone who was never asked in the first place.
+@MainActor
+@Test func notDeterminedMicrophoneSetsADifferentMessageAndNeverCallsStart() async throws {
+    let recorder = FakeRecorder()
+    let session = try makeSession(recorder: recorder, microphoneAuthorizationOverride: .notDetermined)
+
+    session.begin()
+
+    #expect(session.state == .idle)
+    #expect(recorder.startCount == 0)
+    #expect(session.problem != nil)
+    // Distinct wording from the denied case: nothing has been turned off,
+    // so the message must not say to turn it "back" on.
+    #expect(session.problem?.contains("back on") != true)
 }
 
 @MainActor
@@ -914,11 +944,12 @@ final class StateBox {
     struct StartFailed: Error {}
     let recorder = FakeRecorder()
     recorder.startError = StartFailed()
-    let session = try makeSession(recorder: recorder, microphonePermissionDenied: false)
+    let session = try makeSession(recorder: recorder, microphoneAuthorizationOverride: .authorized)
 
     session.begin()
 
     #expect(session.state == .idle)
+    #expect(recorder.startCount == 1)
     #expect(session.problem != nil)
     // Distinct wording from the denied case: this message must not claim
     // the user needs to flip a permission switch when the real cause is
@@ -988,7 +1019,9 @@ final class StateBox {
 @Test func problemClearsOnTheNextBegin() async throws {
     let recorder = FakeRecorder()
     recorder.startError = NSError(domain: "test", code: 1)
-    let session = try makeSession(recorder: recorder, microphonePermissionDenied: true)
+    // `.authorized` (the helper's default): this exercises the post-`start()`
+    // failure path clearing on retry, not the authorization guard above it.
+    let session = try makeSession(recorder: recorder)
 
     session.begin()
     #expect(session.problem != nil)

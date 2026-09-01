@@ -36,3 +36,29 @@ import Testing
     // One second at 16 kHz, allowing for resampler edge effects.
     #expect(abs(samples.count - 16_000) < 200)
 }
+
+// MARK: - AudioFormatValidation
+//
+// The predicate `Recorder.start()` uses to refuse handing `installTap` a
+// degenerate format (denied microphone permission, or no usable input
+// device at all) rather than let it raise an uncatchable Objective-C
+// exception. `Recorder` itself opens real hardware and isn't unit-tested by
+// design, but this guard is a pure function of a sample rate and a channel
+// count, so it's extracted and tested on its own — same reasoning as
+// `PendingDeletionController`/`WindowPolicyTracker`.
+
+@Test func aNormal48kHzStereoFormatIsUsable() {
+    #expect(AudioFormatValidation.isUsable(sampleRate: 48_000, channelCount: 2))
+}
+
+@Test func zeroSampleRateIsRejected() {
+    #expect(!AudioFormatValidation.isUsable(sampleRate: 0, channelCount: 2))
+}
+
+@Test func zeroChannelCountIsRejected() {
+    #expect(!AudioFormatValidation.isUsable(sampleRate: 48_000, channelCount: 0))
+}
+
+@Test func zeroSampleRateAndZeroChannelCountAreBothRejected() {
+    #expect(!AudioFormatValidation.isUsable(sampleRate: 0, channelCount: 0))
+}

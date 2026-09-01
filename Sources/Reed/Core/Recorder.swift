@@ -61,6 +61,26 @@ enum RecorderError: Error {
     case deviceUnavailable
 }
 
+/// Whether a format `AVAudioInputNode.outputFormat(forBus:)` reports is
+/// something `AVAudioEngine.installTap` can actually be handed. A denied
+/// microphone permission — or simply no usable input device at the moment
+/// capture is requested — makes the input node report a degenerate format:
+/// zero sample rate, zero channels. `installTap` does not validate that
+/// itself; it raises an Objective-C exception ("required condition is
+/// false…") that surfaces in Swift as an uncatchable `SIGTRAP`, not a
+/// catchable `Error` — the crash this predicate exists to prevent.
+///
+/// Extracted as a pure, `Recorder`-independent predicate — unlike the rest
+/// of `Recorder`, which opens real hardware and is verified by hand, not
+/// unit-tested by design — so this one guard can be tested without a
+/// microphone, the way `PendingDeletionController` and `WindowPolicyTracker`
+/// were pulled out of their owning types for the same reason.
+enum AudioFormatValidation {
+    static func isUsable(sampleRate: Double, channelCount: AVAudioChannelCount) -> Bool {
+        sampleRate > 0 && channelCount > 0
+    }
+}
+
 /// Thread-safe accumulator for converted samples. The audio-render thread appends
 /// synchronously (no async hop, no race with `drain()`), while `Recorder` reads/resets
 /// it from the main actor. Marked `@unchecked Sendable` because the `NSLock` makes every
@@ -119,8 +139,26 @@ final class Recorder {
             guard status == noErr else { throw RecorderError.deviceUnavailable }
         }
 
+        // `prepare()` allocates the engine's render resources and settles
+        // its node connections; called before reading the input node's
+        // format (rather than after, as this used to), it gives a real,
+        // present microphone a chance to report its actual negotiated
+        // format instead of whatever placeholder the node holds before the
+        // graph has ever been prepared. It does not change the outcome
+        // when there is genuinely no usable input — permission denied, or
+        // no device at all — the format is degenerate either way, which is
+        // exactly what the validation below exists to catch regardless of
+        // *why* it's degenerate.
+        engine.prepare()
+
         let input = engine.inputNode
         let inputFormat = input.outputFormat(forBus: 0)
+        guard AudioFormatValidation.isUsable(
+            sampleRate: inputFormat.sampleRate, channelCount: inputFormat.channelCount
+        ) else {
+            throw RecorderError.deviceUnavailable
+        }
+
         let targetFormat = self.targetFormat
         let buffer = self.buffer
 
@@ -156,7 +194,6 @@ final class Recorder {
             }
         }
 
-        engine.prepare()
         try engine.start()
     }
 

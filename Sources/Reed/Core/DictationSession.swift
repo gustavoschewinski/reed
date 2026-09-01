@@ -87,12 +87,13 @@ final class DictationSession: ObservableObject {
     private let paste: (() -> Void)?
     private let passInterval: Duration
     private let playCue: (DictationCue) -> Void
-    /// Test seam for the microphone-denied branch of `begin()`'s failure
-    /// message: nil means "ask the real system" (`AVCaptureDevice`'s cached
-    /// authorization status — a read, not a request, so this never triggers
-    /// a permission prompt), matching the `canPaste: Bool?` pattern already
-    /// used above for `TextDelivery`.
-    private let microphonePermissionDenied: Bool?
+    /// Test seam for the microphone-authorization check `begin()` runs
+    /// before it ever touches the recorder: nil means "ask the real
+    /// system" (`AVCaptureDevice`'s cached authorization status — a read,
+    /// not a request, so this never triggers a permission prompt),
+    /// matching the `canPaste: Bool?` pattern already used above for
+    /// `TextDelivery`.
+    private let microphoneAuthorizationOverride: AVAuthorizationStatus?
 
     /// Drives `StreamingTranscriber.runPassIfDue()`. Exactly one pass is ever
     /// in flight: the loop awaits each pass to completion before deciding
@@ -149,7 +150,7 @@ final class DictationSession: ObservableObject {
             case .cancel: Cues.cancel()
             }
         },
-        microphonePermissionDenied: Bool? = nil
+        microphoneAuthorizationOverride: AVAuthorizationStatus? = nil
     ) {
         self.recorder = recorder
         self.transcriber = transcriber
@@ -162,7 +163,7 @@ final class DictationSession: ObservableObject {
         self.paste = paste
         self.passInterval = passInterval
         self.playCue = playCue
-        self.microphonePermissionDenied = microphonePermissionDenied
+        self.microphoneAuthorizationOverride = microphoneAuthorizationOverride
 
         recorder.onLevel = { [weak self] level in self?.level = level }
         recorder.onSamples = { [weak self] samples in
@@ -186,6 +187,31 @@ final class DictationSession: ObservableObject {
     /// `.holdStart` (and `.tap` from idle, via `toggle()`): idle → recording.
     func begin() {
         guard state == .idle else { return }
+
+        // Checked first, before anything else here touches audio: a
+        // microphone that isn't authorized can't record, and attempting it
+        // anyway is exactly the "try and recover" pattern that let a
+        // degenerate, zero-rate input format reach `AVAudioEngine.
+        // installTap` and crash the app with an uncatchable SIGTRAP. A user
+        // who has never been asked needs a different sentence from one who
+        // said no, so the two cases are told apart here rather than
+        // collapsed into one generic message.
+        switch microphoneAuthorizationStatus() {
+        case .authorized:
+            break
+        case .notDetermined:
+            problem = "Reed needs microphone access to dictate. "
+                + "Open Settings to grant it."
+            return
+        case .denied, .restricted:
+            problem = "Reed can't hear you — microphone access is off. "
+                + "Open Settings to turn it back on."
+            return
+        @unknown default:
+            problem = "Reed can't hear you — microphone access is off. "
+                + "Open Settings to turn it back on."
+            return
+        }
 
         pendingSamples = []
         appendedSampleCount = 0
@@ -216,7 +242,12 @@ final class DictationSession: ObservableObject {
             try recorder.start(deviceID: settings.inputDeviceID)
         } catch {
             NSLog("Reed: failed to start recording: %@", String(describing: error))
-            problem = microphoneProblemMessage()
+            // Authorization was already confirmed above, so a throw here
+            // is something else — no microphone attached, another app
+            // holding the device exclusively, or the input format was
+            // rejected by `Recorder`'s own validation — not a permission
+            // problem, so the message doesn't claim it's one.
+            problem = "Reed couldn't start recording. Check that a microphone is connected and try again."
             teardown()
             return
         }
@@ -240,25 +271,11 @@ final class DictationSession: ObservableObject {
         }
     }
 
-    /// What to tell the user when `recorder.start()` throws — the
-    /// likeliest and most silent of Reed's failure causes, since unlike
-    /// the others it happens before the pill would otherwise ever appear.
-    /// Distinguishes "you said no" (denied/restricted — actionable, fixed
-    /// in Settings) from anything else (no microphone attached, another
-    /// app holding it exclusively, etc.) without pretending to know which.
-    private func microphoneProblemMessage() -> String {
-        let denied = microphonePermissionDenied ?? {
-            switch AVCaptureDevice.authorizationStatus(for: .audio) {
-            case .denied, .restricted: return true
-            case .authorized, .notDetermined: return false
-            @unknown default: return false
-            }
-        }()
-        if denied {
-            return "Reed can't hear you — microphone access is off. "
-                + "Open Settings to turn it back on."
-        }
-        return "Reed couldn't start recording. Check that a microphone is connected and try again."
+    /// The microphone's current authorization, checked before `begin()`
+    /// ever calls `recorder.start()` — a read of the cached status, not a
+    /// request, so this never itself triggers a permission prompt.
+    private func microphoneAuthorizationStatus() -> AVAuthorizationStatus {
+        microphoneAuthorizationOverride ?? AVCaptureDevice.authorizationStatus(for: .audio)
     }
 
     /// `.recording` → idle immediately: delivers nothing, stores nothing.
