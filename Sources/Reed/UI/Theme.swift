@@ -55,6 +55,15 @@ enum Theme {
     /// Respect `accessibilityReduceMotion`: none of these fire under it —
     /// state changes apply straight away instead.
     static let appearSpring = Animation.spring(response: 0.18, dampingFraction: 0.82)
+    /// `OverlayPanel` grows the actual `NSPanel` frame as the pill's SwiftUI
+    /// content grows — still animation 1 (appear-and-grow), but driven by a
+    /// second mechanism: AppKit's own `NSAnimationContext`, a different
+    /// animation *system* from the SwiftUI spring above (Core Animation's
+    /// window-frame resize, not a spring), because `NSWindow` frames aren't
+    /// animatable by a SwiftUI `Animation`. Pinning its duration to
+    /// `appearSpring`'s `response` here, rather than leaving it at AppKit's
+    /// undeclared default, is what keeps the two stated in one place.
+    static let panelGrowDuration: TimeInterval = 0.18
     static let waveformSpring = Animation.spring(response: 0.22, dampingFraction: 0.7)
     static let settleFade = Animation.easeInOut(duration: 0.15)
 }

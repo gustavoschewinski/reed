@@ -1,4 +1,5 @@
 import AppKit
+import QuartzCore
 import SwiftUI
 
 /// Hosts `OverlayView` in a floating, non-activating panel — the recording
@@ -20,6 +21,11 @@ final class OverlayPanel: NSPanel {
     private static let minHeight: CGFloat = 44
 
     private var contentHeight: CGFloat = OverlayPanel.minHeight
+    /// Repositions the pill if the screen layout changes mid-recording (an
+    /// external display unplugged, resolution changed, Dock resized) —
+    /// registered in `show()`, removed in `hide()` so nothing fires, or even
+    /// stays registered, while the panel is off-screen.
+    private var screenParametersObserver: NSObjectProtocol?
 
     init() {
         super.init(
@@ -32,6 +38,9 @@ final class OverlayPanel: NSPanel {
         isOpaque = false
         backgroundColor = .clear
         hasShadow = true
+        // `.stationary` beyond what was specified: it keeps the HUD out of
+        // Mission Control's window shuffling, which otherwise treats a
+        // floating borderless panel as just another window to rearrange.
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         hidesOnDeactivate = false
         isReleasedWhenClosed = false
@@ -59,9 +68,31 @@ final class OverlayPanel: NSPanel {
         // `orderFrontRegardless`, never `makeKeyAndOrderFront` — showing the
         // panel must not grant it key status.
         orderFrontRegardless()
+
+        if screenParametersObserver == nil {
+            screenParametersObserver = NotificationCenter.default.addObserver(
+                forName: NSApplication.didChangeScreenParametersNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                // `queue: .main` guarantees this already runs on the main
+                // thread; `assumeIsolated` is the same pattern `Recorder`
+                // uses to cross back into MainActor-isolated code from an
+                // API that requires a plain `@Sendable` closure.
+                MainActor.assumeIsolated {
+                    guard let self, self.isVisible else { return }
+                    self.positionBottomCenter(height: self.contentHeight)
+                }
+            }
+        }
     }
 
     func hide() {
+        if let screenParametersObserver {
+            NotificationCenter.default.removeObserver(screenParametersObserver)
+        }
+        screenParametersObserver = nil
+
         orderOut(nil)
         // Dropped rather than reused: the next `show()` should start every
         // piece of per-recording state (the local stopwatch, the waveform's
@@ -76,6 +107,11 @@ final class OverlayPanel: NSPanel {
         positionBottomCenter(height: contentHeight)
     }
 
+    /// Recomputed from `NSScreen.main` every call, never cached — covers
+    /// both a fresh `show()` (the user may have moved to another display
+    /// since the panel last showed) and a mid-recording screen-parameters
+    /// change (Finding 4: an external display disconnecting must not leave
+    /// the panel parked on a screen that no longer exists).
     private func positionBottomCenter(height: CGFloat) {
         guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
         let screenFrame = screen.frame
@@ -84,7 +120,20 @@ final class OverlayPanel: NSPanel {
         let y = screenFrame.minY + Self.bottomInset
         let newFrame = NSRect(x: x, y: y, width: width, height: height)
 
-        setFrame(newFrame, display: true, animate: isVisible && !reduceMotionEnabled)
+        guard isVisible, !reduceMotionEnabled else {
+            setFrame(newFrame, display: true)
+            return
+        }
+
+        // `Theme.panelGrowDuration` — not AppKit's own undeclared default —
+        // so this and the SwiftUI content spring it accompanies are at
+        // least stated in one place, even though an `NSWindow` frame can
+        // only be driven by Core Animation, never by a SwiftUI `Animation`.
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = Theme.panelGrowDuration
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            animator().setFrame(newFrame, display: true)
+        }
     }
 
     private var reduceMotionEnabled: Bool {

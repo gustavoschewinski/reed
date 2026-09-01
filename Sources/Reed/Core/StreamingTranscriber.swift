@@ -106,11 +106,14 @@ actor StreamingTranscriber {
 
         guard !result.words.isEmpty else {
             // No word-level timing at all this pass, so there is nothing to
-            // split on — treated entirely as hypothesis so `fullText` stays
-            // byte-identical to the pre-split behavior (`result.text` alone,
-            // never prefixed with `engine.confirmedText`).
+            // run through the agreement engine — but whatever the engine
+            // already confirmed on an earlier pass must stay visible.
+            // Returning "" here would make already-locked-in text vanish
+            // from the pill (not dim — gone) until the next pass that does
+            // carry timings brings it back; only this pass's raw text is
+            // actually uncertain.
             guard !result.text.isEmpty else { return nil }
-            return PreviewUpdate(confirmedText: "", hypothesisText: result.text)
+            return PreviewUpdate(confirmedText: engine.confirmedText, hypothesisText: result.text)
         }
 
         let agreement = engine.process(words: result.words, passConfidence: result.confidence)

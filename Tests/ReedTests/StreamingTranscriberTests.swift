@@ -264,6 +264,31 @@ private let script = "one two. three four. five six. seven eight"
     #expect(fourth.fullText == script)
 }
 
+@Test func wordslessPassKeepsAlreadyConfirmedTextVisible() async throws {
+    // A 5th pass returns text with no word-level timing at all — the model
+    // can do this on a pass it isn't confident enough to timestamp. It must
+    // not erase "one two.", which a prior pass already confirmed.
+    let fake = ScriptedTranscriber(
+        passes: Array(repeating: pass(script), count: 4)
+            + [TranscriptionPass(text: "nine ten", words: [], confidence: 1.0)]
+    )
+    let streamer = StreamingTranscriber(transcriber: fake)
+
+    await streamer.begin()
+    await streamer.append([Float](repeating: 0.1, count: 160_000))  // 10 seconds
+
+    for _ in 0..<3 { _ = await streamer.runPassIfDue() }
+    let fourth = try #require(await streamer.runPassIfDue())
+    #expect(fourth.confirmedText == "one two.")  // sanity: the confirmation landed
+
+    // The pass under test: no words, so nothing for the agreement engine to
+    // process, but "one two." must still come back rather than "".
+    let fifth = try #require(await streamer.runPassIfDue())
+    #expect(fifth.confirmedText == "one two.")
+    #expect(fifth.hypothesisText == "nine ten")
+    #expect(fifth.fullText == "one two. nine ten")
+}
+
 @Test func previewSuspendsWhenTheUnconfirmedTailGrowsTooLarge() async throws {
     // Never actually consumed by runPassIfDue() below, since the cap must
     // stop it from calling transcribe at all — available for finish()'s
