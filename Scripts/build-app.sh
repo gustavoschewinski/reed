@@ -16,7 +16,16 @@ cp "$ROOT/Resources/Info.plist" "$CONTENTS/Info.plist"
 
 # SwiftPM emits dependency resources as .bundle directories next to the binary.
 for bundle in "$BIN"/*.bundle; do
-    [ -e "$bundle" ] && cp -R "$bundle" "$CONTENTS/Resources/"
+    [ -e "$bundle" ] || continue
+    dest="$CONTENTS/Resources/$(basename "$bundle")"
+    cp -R "$bundle" "$dest"
+
+    # FluidAudio's resource bundle carries LuxTTS lexicon/pronunciation data
+    # (luxtts_en_us_*) used only by its text-to-speech path. Reed is ASR-only
+    # (AsrManager/Parakeet) and never constructs LuxTtsG2p, so these files are
+    # dead weight — drop them, and the bundle itself if that empties it.
+    find "$dest" -type f -iname 'luxtts_*' -delete
+    find "$dest" -type d -empty -delete
 done
 
 for asset in Reed.icns start.aiff stop.aiff cancel.aiff; do
