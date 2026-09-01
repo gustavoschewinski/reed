@@ -242,7 +242,14 @@ private func makeSession(
     requestMicrophoneAccess: @escaping () async -> Bool = { true }
 ) throws -> DictationSession {
     let store = try store ?? TranscriptStore(inMemory: true)
-    let settings = settings ?? Settings(defaults: FakeUserDefaults())
+    // Media pause ships off by default (macOS gives no reliable
+    // "is anything playing" signal), but it is still a supported setting,
+    // so the tests that exercise that path opt in here.
+    let settings = settings ?? {
+        let s = Settings(defaults: FakeUserDefaults())
+        s.pauseMediaWhileRecording = true
+        return s
+    }()
     let backing = transcriber ?? ScriptedTranscriber(passes: passes)
     let streaming = StreamingTranscriber(transcriber: backing)
     let cuePlayer = cuePlayer ?? FakeCuePlayer()

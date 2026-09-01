@@ -75,7 +75,14 @@ final class Settings: ObservableObject {
         defaults.register(defaults: [
             Keys.playSounds: true,
             Keys.muteWhileRecording: true,
-            Keys.pauseMediaWhileRecording: true,
+            // Off by default: the play/pause media key is a blind toggle,
+            // and macOS exposes no reliable way to know whether anything
+            // is actually playing — apps like browsers hold the output
+            // device open indefinitely while silent, so "is audio
+            // running" reads true on an idle Mac. Pressing the key then
+            // *starts* music the user had paused. Muting (on by default)
+            // already silences playback while recording.
+            Keys.pauseMediaWhileRecording: false,
             Keys.hasCompletedOnboarding: false,
             Keys.dictationMode: DictationMode.toggle.rawValue,
         ])

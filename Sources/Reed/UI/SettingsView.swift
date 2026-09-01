@@ -128,7 +128,13 @@ struct SettingsView: View {
 
                         toggleRow("Play sounds while recording", isOn: $settings.playSounds)
                         toggleRow("Mute other audio while recording", isOn: $settings.muteWhileRecording)
-                        toggleRow("Pause media while recording", isOn: $settings.pauseMediaWhileRecording)
+                        toggleRow(
+                            "Pause media while recording",
+                            isOn: $settings.pauseMediaWhileRecording,
+                            note: "macOS doesn't tell apps whether media is playing, so this "
+                                + "can start something that was paused. Muting already silences "
+                                + "playback while you dictate."
+                        )
                     }
                 }
 
@@ -309,9 +315,19 @@ struct SettingsView: View {
         }
     }
 
-    private func toggleRow(_ title: String, isOn: Binding<Bool>) -> some View {
-        Toggle(title, isOn: isOn)
-            .tint(Theme.Window.reed)
-            .foregroundColor(Theme.Window.textPrimary)
+    private func toggleRow(
+        _ title: String, isOn: Binding<Bool>, note: String? = nil
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Toggle(title, isOn: isOn)
+                .tint(Theme.Window.reed)
+                .foregroundColor(Theme.Window.textPrimary)
+            if let note {
+                Text(note)
+                    .font(.system(size: 11))
+                    .foregroundColor(Theme.Window.textDim)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
     }
 }
