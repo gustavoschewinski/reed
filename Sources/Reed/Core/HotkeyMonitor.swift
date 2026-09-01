@@ -17,11 +17,21 @@ enum HotkeyGesture: Sendable, Equatable {
 /// Decides whether a press is a tap or a hold. Pure: it sees only timestamps in
 /// seconds, from any monotonic source.
 struct HotkeyInterpreter: Sendable {
+    /// Single source of truth for the tap/hold boundary. `HotkeyMonitor` sleeps
+    /// for exactly this long before polling `elapsedCheck`; the two must never
+    /// diverge. If the monitor's sleep were shorter than this threshold, its
+    /// one-shot poll would fire too early, see `elapsedCheck` return nil, and
+    /// never retry — so `.holdStart` would never fire during a hold, even
+    /// though `.holdEnd` still would (it recomputes from real elapsed time on
+    /// release). Binding both to this constant makes that divergence
+    /// impossible instead of merely unlikely.
+    static let holdThreshold: Duration = .milliseconds(400)
+
     private let holdThreshold: Double
     private var pressedAt: Double?
     private var holding = false
 
-    init(holdThreshold: Duration = .milliseconds(400)) {
+    init(holdThreshold: Duration = Self.holdThreshold) {
         let c = holdThreshold.components
         self.holdThreshold = Double(c.seconds) + Double(c.attoseconds) / 1e18
     }
@@ -62,11 +72,17 @@ final class HotkeyMonitor {
 
     private var interpreter = HotkeyInterpreter()
     private var holdTimer: Task<Void, Never>?
+    private var isActivated = false
 
     /// Monotonic, unlike wall-clock time, which can jump.
     private var now: Double { ProcessInfo.processInfo.systemUptime }
 
     func activate() {
+        // KeyboardShortcuts appends handlers rather than replacing them, so a
+        // second call would register duplicate closures for the same event.
+        guard !isActivated else { return }
+        isActivated = true
+
         KeyboardShortcuts.onKeyDown(for: .dictate) { [weak self] in
             guard let self else { return }
             _ = self.interpreter.keyDown(at: self.now)
@@ -74,11 +90,12 @@ final class HotkeyMonitor {
             // Promote to a hold if the key is still down after the threshold.
             self.holdTimer?.cancel()
             self.holdTimer = Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(400))
+                try? await Task.sleep(for: HotkeyInterpreter.holdThreshold)
                 guard !Task.isCancelled else { return }
                 if let gesture = self.interpreter.elapsedCheck(at: self.now) {
                     self.onGesture?(gesture)
                 }
+                self.holdTimer = nil
             }
         }
 

@@ -61,3 +61,15 @@ import Testing
     _ = interp.keyDown(at: 5.0)
     #expect(interp.keyUp(at: 5.1) == .tap)
 }
+
+// This test deliberately omits an explicit `holdThreshold:` argument, unlike
+// the nine above — it exercises the default, which HotkeyMonitor also relies
+// on indirectly by sleeping for `HotkeyInterpreter.holdThreshold`. If the two
+// ever diverge back into separate literals, this is the test that would
+// silently stop meaning what it says.
+@Test func defaultInterpreterUsesTheSharedHoldThresholdConstant() {
+    var interp = HotkeyInterpreter()
+    _ = interp.keyDown(at: 0)
+    #expect(interp.elapsedCheck(at: 0.39) == nil)
+    #expect(interp.elapsedCheck(at: 0.40) == .holdStart)
+}
