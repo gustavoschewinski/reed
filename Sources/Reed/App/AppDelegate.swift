@@ -60,6 +60,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// indistinguishable to anything that only wants to bring it forward.
     private var onboardingWindow: NSWindow?
 
+    /// Counts how many of Reed's own windows (main, onboarding — never the
+    /// overlay, see its own doc comment) are open, so this delegate knows
+    /// when to promote the app to `.regular` and when to drop back to
+    /// `.accessory`. See `WindowPolicyTracker`'s own doc comment for why
+    /// this is necessary at all: an `.accessory` app cannot properly own a
+    /// foreground window, and with no Dock icon a window that recedes
+    /// behind other apps looks, to the user, exactly like it closed.
+    private var windowPolicyTracker = WindowPolicyTracker()
+
     override init() {
         // Item 1: must run before anything in this launch ever calls
         // `SystemAudio.mute()` (the `session` constructed a few lines down
@@ -320,6 +329,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mainWindowState.selectedTab = tab
 
         if let mainWindow {
+            // Reopening after a titlebar close (which orders out but never
+            // nils `mainWindow` or releases it — see its own doc comment)
+            // means the tracker no longer counts it as open; re-track it and
+            // restore `.regular` before bringing it forward, same as below.
+            if windowPolicyTracker.windowDidOpen(.main) {
+                NSApp.setActivationPolicy(.regular)
+            }
             mainWindow.makeKeyAndOrderFront(nil)
         } else {
             let window = NSWindow(
@@ -337,11 +353,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             window.contentView = NSHostingView(
                 rootView: MainWindowView(store: store, settings: settings, state: mainWindowState)
             )
+
+            // Must happen before `makeKeyAndOrderFront` — an `.accessory`
+            // app promoted to `.regular` only after ordering the window
+            // front does not reliably take focus. See
+            // `WindowPolicyTracker`'s doc comment.
+            if windowPolicyTracker.windowDidOpen(.main) {
+                NSApp.setActivationPolicy(.regular)
+            }
             window.makeKeyAndOrderFront(nil)
             mainWindow = window
+
+            // Same notification onboarding's window already observes (see
+            // `showOnboardingWindow`) — one mechanism, not two. Unlike
+            // onboarding, closing the main window never nils `mainWindow`:
+            // this window is reused for the rest of the launch, only ever
+            // ordered out and back in.
+            NotificationCenter.default.addObserver(
+                forName: NSWindow.willCloseNotification, object: window, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.windowDidClose(.main)
+                }
+            }
         }
 
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// Shared by both of Reed's windows' `willCloseNotification` observers:
+    /// drops the app back to `.accessory` exactly when the window that just
+    /// closed was the last one open. See `WindowPolicyTracker`.
+    private func windowDidClose(_ kind: WindowPolicyTracker.Kind) {
+        if windowPolicyTracker.windowDidClose(kind) {
+            NSApp.setActivationPolicy(.accessory)
+        }
     }
 
     // MARK: - Onboarding
@@ -354,6 +400,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// stays free of all three and testable without them.
     private func showOnboardingWindow() {
         if let onboardingWindow {
+            // Same re-tracking as `openMainWindow`'s reopen path: a titlebar
+            // close (without finishing onboarding) orders out and stops the
+            // permission poll but never nils `onboardingWindow`, so the
+            // tracker no longer counts it as open — restore `.regular`
+            // before bringing it forward.
+            if windowPolicyTracker.windowDidOpen(.onboarding) {
+                NSApp.setActivationPolicy(.regular)
+            }
             onboardingWindow.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             return
@@ -418,6 +472,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // `window.appearance` nil is what makes it follow the system
         // light/dark appearance instead of staying fixed like the overlay.
         window.contentView = NSHostingView(rootView: OnboardingView(model: model))
+
+        // Must happen before `makeKeyAndOrderFront` — see the matching
+        // comment in `openMainWindow`.
+        if windowPolicyTracker.windowDidOpen(.onboarding) {
+            NSApp.setActivationPolicy(.regular)
+        }
         window.makeKeyAndOrderFront(nil)
         onboardingWindow = window
 
@@ -430,15 +490,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 750ms timer can never keep ticking for the rest of the app's
         // life. `stopObservingPermissions()` is idempotent, so this is a
         // no-op on the (usual) path where polling was already stopped.
+        //
+        // The same notification also drives the activation-policy handoff
+        // (`windowDidClose`) — one mechanism for both, not two.
         NotificationCenter.default.addObserver(
             forName: NSWindow.willCloseNotification, object: window, queue: .main
-        ) { [weak model] _ in
+        ) { [weak self, weak model] _ in
             // `queue: .main` above already guarantees this runs on the main
             // thread; `assumeIsolated` just tells the type system what's
             // already true, the same pattern `Recorder` uses for its own
             // main-queue callback.
             MainActor.assumeIsolated {
                 model?.stopObservingPermissions()
+                self?.windowDidClose(.onboarding)
             }
         }
 
