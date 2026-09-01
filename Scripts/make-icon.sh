@@ -3,9 +3,11 @@
 #
 # The design is a cane reed — the blade that vibrates to give a clarinet or
 # saxophone its voice — in brass (#C9A227) on a dark rounded-square ground.
-# It has the three features that make a reed read as a reed rather than a
-# leaf or a flame: a flat, square-cut base; an asymmetric taper (thick at
-# the base, shaved to almost nothing at the tip); and a central spine.
+# It has the features that make a reed read as a reed rather than a leaf,
+# a flame, or a dagger: a flat, square-cut base; an asymmetric taper (thick
+# at the base, shaved thin toward the tip); a blunt, flat-cut tip instead
+# of a needle point (a real reed ends in a shaved edge, not a spike — a
+# point is what makes a blade read as a weapon); and a central spine.
 #
 # The spine disappears below 128px: at 16-64px it anti-aliases into the
 # fill and just reads as mush, so those sizes render from a spine-free
@@ -30,13 +32,17 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 # Shared blade silhouette: flat-cut base at y=820, near-parallel "heel" for
-# the first ~160px, then a long asymmetric taper up to a near-point tip.
-BLADE_PATH='M 424 820
-            L 600 820
-            C 600 764 596 706 588 656
-            C 574 500 542 320 512 202
-            C 482 320 450 500 436 656
-            C 428 706 424 764 424 820
+# the first ~160px, a long asymmetric taper, then a flat-cut blunt tip
+# (width 32, vs. a base width of 200) instead of a needle point.
+BLADE_PATH='M 412 820
+            L 612 820
+            C 612 764 608 706 598 656
+            C 582 500 546 320 528 224
+            L 528 208
+            L 496 208
+            L 496 224
+            C 478 320 442 500 426 656
+            C 416 706 412 764 412 820
             Z'
 
 cat > "$WORK/icon.svg" << EOF
