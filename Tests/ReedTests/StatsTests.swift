@@ -41,6 +41,26 @@ private func item(_ iso: String, words: Int = 100, duration: Double = 60) -> Sta
     #expect(Stats.totalTimeSaved(items) == 240)
 }
 
+@Test func totalTimeSavedSubtractsNegativeTranscriptsBeforeClamping() {
+    // Mixed signs test catches clamp-order regressions: must sum then clamp,
+    // not clamp each term then sum (which would hide negative transcripts).
+    let negativeItem = item("2026-08-31T10:00:00Z", words: 10, duration: 300)
+
+    // Case 1: positive (240) + negative (-285) = -45 → clamp to 0
+    let items1 = [
+        item("2026-08-31T10:00:00Z", words: 200, duration: 60),
+        negativeItem,
+    ]
+    #expect(Stats.totalTimeSaved(items1) == 0)
+
+    // Case 2: positive (540) + negative (-285) = 255 → no clamp
+    let items2 = [
+        item("2026-08-31T10:00:00Z", words: 400, duration: 60),
+        negativeItem,
+    ]
+    #expect(Stats.totalTimeSaved(items2) == 255)
+}
+
 @Test func streakCountsConsecutiveDaysEndingToday() {
     let items = [
         item("2026-08-31T10:00:00Z"),
