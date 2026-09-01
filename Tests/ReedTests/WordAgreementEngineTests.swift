@@ -59,25 +59,42 @@ private let sentence = "one two. three four. five six. seven eight"
     let a = words(sentence)
     let b = words("nine ten. eleven twelve. thirteen fourteen. fifteen")
 
-    _ = engine.process(words: a, passConfidence: 1.0)
-    _ = engine.process(words: a, passConfidence: 1.0)
-    _ = engine.process(words: b, passConfidence: 1.0)  // disagreement
-    _ = engine.process(words: b, passConfidence: 1.0)
+    _ = engine.process(words: a, passConfidence: 1.0)  // pass 1: first pass, no comparison
+    _ = engine.process(words: a, passConfidence: 1.0)  // pass 2: agreement count 1
+    _ = engine.process(words: b, passConfidence: 1.0)  // pass 3: disagreement — resets the counter
+    _ = engine.process(words: b, passConfidence: 1.0)  // pass 4: agreement count 1 if reset happened
+    _ = engine.process(words: b, passConfidence: 1.0)  // pass 5: agreement count 2 if reset happened
+
+    // A correctly-resetting engine needs one more agreeing pass to confirm.
+    // An engine that never reset would already have reached 3 agreements by
+    // pass 5 (1 carried over from `a` + 2 from `b`) and confirmed early.
     #expect(engine.confirmedText.isEmpty)
+
+    let sixth = engine.process(words: b, passConfidence: 1.0)  // pass 6: agreement count 3
+    #expect(!sixth.newlyConfirmedText.isEmpty)
 }
 
 @Test func lowConfidencePassIsShownButDoesNotCountTowardAgreement() {
     let engine = WordAgreementEngine()
     let w = words(sentence)
-    _ = engine.process(words: w, passConfidence: 1.0)
-    _ = engine.process(words: w, passConfidence: 1.0)
-    let weak = engine.process(words: w, passConfidence: 0.1)
+    _ = engine.process(words: w, passConfidence: 1.0)  // pass 1: first pass, no comparison
+    _ = engine.process(words: w, passConfidence: 1.0)  // pass 2: agreement count 1
+    let weak = engine.process(words: w, passConfidence: 0.1)  // pass 3: low confidence — resets the counter
 
     #expect(weak.fullText == "one two. three four. five six. seven eight")
     #expect(weak.newlyConfirmedText.isEmpty)
 
-    _ = engine.process(words: w, passConfidence: 1.0)
+    _ = engine.process(words: w, passConfidence: 1.0)  // pass 4: agreement count 1 if reset happened
+    _ = engine.process(words: w, passConfidence: 1.0)  // pass 5: agreement count 2 if reset happened
+
+    // A correctly-resetting engine needs one more agreeing pass to confirm.
+    // An engine that never reset would already have reached 3 agreements by
+    // pass 5 (1 carried over from before the weak pass + 2 after it) and
+    // confirmed early.
     #expect(engine.confirmedText.isEmpty)  // the counter restarted
+
+    let sixth = engine.process(words: w, passConfidence: 1.0)  // pass 6: agreement count 3
+    #expect(!sixth.newlyConfirmedText.isEmpty)
 }
 
 @Test func lowConfidenceBoundaryWordsBlockConfirmation() {
@@ -139,4 +156,22 @@ private let sentence = "one two. three four. five six. seven eight"
     let second = words("nine ten. eleven twelve. thirteen fourteen. fifteen", from: 10)
     for _ in 0..<4 { _ = engine.process(words: second, passConfidence: 1.0) }
     #expect(engine.confirmedText == "one two. nine ten.")
+}
+
+@Test func normalizationKeepsApostrophesSoContractionsDoNotCollideWithLookalikes() {
+    let contraction = TimedWord(text: "it's", startTime: 0, endTime: 1)
+    let possessive = TimedWord(text: "its", startTime: 0, endTime: 1)
+    #expect(contraction.normalizedText != possessive.normalizedText)
+}
+
+@Test func normalizationTreatsApostropheVariantsAsEqual() {
+    let straight = TimedWord(text: "it's", startTime: 0, endTime: 1)
+    let curly = TimedWord(text: "it\u{2019}s", startTime: 0, endTime: 1)
+    #expect(straight.normalizedText == curly.normalizedText)
+}
+
+@Test func normalizationKeepsWereDistinctFromWereContraction() {
+    let contraction = TimedWord(text: "we're", startTime: 0, endTime: 1)
+    let plain = TimedWord(text: "were", startTime: 0, endTime: 1)
+    #expect(contraction.normalizedText != plain.normalizedText)
 }

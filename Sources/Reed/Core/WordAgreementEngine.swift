@@ -18,11 +18,18 @@ struct TimedWord: Sendable, Equatable {
 
     /// Two passes may punctuate or capitalise the same word differently. Compare
     /// on a stripped form so those differences do not read as disagreement.
+    /// Apostrophes are normalized to a single ASCII form and KEPT — not
+    /// stripped — because dropping them collides genuinely different words
+    /// ("it's" vs "its", "we're" vs "were"), and confirmation is permanent.
     private static func normalize(_ text: String) -> String {
-        String(
-            text.lowercased()
+        let apostropheVariants: [Character] = ["\u{2019}", "\u{02BC}"]
+        let unifiedApostrophes = String(
+            text.lowercased().map { apostropheVariants.contains($0) ? "'" : $0 }
+        )
+        return String(
+            unifiedApostrophes
                 .replacingOccurrences(of: "-", with: " ")
-                .filter { $0.isLetter || $0.isNumber || $0.isWhitespace }
+                .filter { $0.isLetter || $0.isNumber || $0.isWhitespace || $0 == "'" }
         ).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
@@ -32,6 +39,9 @@ struct TimedWord: Sendable, Equatable {
 struct AgreementConfig: Sendable {
     var transcribeInterval: Double = 1.0
     var confirmationsNeeded: Int = 3
+    /// Minimum agreeing-prefix length before a streak starts counting toward
+    /// `confirmationsNeeded`. Does NOT bound how many words a confirmation
+    /// contains — a confirmation can be as short as one word.
     var minWordsToConfirm: Int = 5
     /// Passes below this are displayed but excluded from agreement counting.
     var minPassConfidence: Float = 0.15
