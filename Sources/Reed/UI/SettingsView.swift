@@ -41,6 +41,24 @@ struct SettingsView: View {
                                 ForEach(devices) { device in
                                     Text(device.name).tag(AudioDeviceID?.some(device.id))
                                 }
+                                // The saved device may not be plugged in
+                                // right now. Without an entry for it, no tag
+                                // in this Picker would match the current
+                                // selection — and on macOS an unmatched
+                                // selection gets silently reassigned to the
+                                // first item, *writing that back* through
+                                // the two-way binding the instant this view
+                                // renders. Rendering Settings must never
+                                // change a stored setting, so this keeps a
+                                // (disabled — it can't be "chosen" again
+                                // without being plugged back in) placeholder
+                                // entry for exactly that ID, purely so the
+                                // selection still has somewhere to match.
+                                if let missingDeviceID {
+                                    Text("Unavailable Microphone")
+                                        .tag(AudioDeviceID?.some(missingDeviceID))
+                                        .disabled(true)
+                                }
                             }
                             .labelsHidden()
                             .accessibilityLabel("Microphone")
@@ -76,6 +94,18 @@ struct SettingsView: View {
     private func reload() {
         devices = AudioDevices.inputs()
         launchAtLogin = LaunchAtLogin.isEnabled
+    }
+
+    /// The saved input device's ID, but only when it's *not* among the
+    /// currently connected `devices` — i.e. only when the picker actually
+    /// needs a placeholder entry for it. `nil` whenever the saved device is
+    /// connected (it already has a real entry) or when the setting is
+    /// System Default (nothing to place).
+    private var missingDeviceID: AudioDeviceID? {
+        guard let id = settings.inputDeviceID, !devices.contains(where: { $0.id == id }) else {
+            return nil
+        }
+        return id
     }
 
     private func section<Content: View>(

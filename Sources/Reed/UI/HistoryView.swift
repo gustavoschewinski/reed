@@ -7,19 +7,35 @@ import SwiftUI
 /// Delete is deliberately not a modal confirmation — a modal for a routine,
 /// reversible action is friction. Instead the row disappears immediately
 /// and an undo bar appears at the bottom; the underlying `TranscriptStore`
-/// deletion only actually happens a few seconds later, unless undone.
+/// deletion only actually happens a few seconds later, unless undone. That
+/// state machine lives in `PendingDeletionController`, not here — this view
+/// only reads its `pending` and calls `delete`/`undo`.
 @MainActor
 struct HistoryView: View {
     @ObservedObject var store: TranscriptStore
+    @StateObject private var pendingDeletion: PendingDeletionController<PendingRow>
 
     @State private var transcripts: [Transcript] = []
     @State private var query = ""
-    @State private var pendingDeletion: PendingDeletion?
     @State private var copiedID: UUID?
 
-    /// How long the undo bar stays up before the deletion actually commits
-    /// to the store.
-    private static let undoWindow: Duration = .seconds(5)
+    /// A row mid-deletion: the transcript itself, plus where it sat in
+    /// `transcripts` so undo can put it back in the same place.
+    private struct PendingRow {
+        let transcript: Transcript
+        let index: Int
+    }
+
+    init(store: TranscriptStore) {
+        self.store = store
+        // `store` here is the initializer's own parameter, not `self.store`
+        // (reading that before `self` is fully initialized isn't allowed) —
+        // it's the same instance either way, just captured before `self`
+        // exists.
+        _pendingDeletion = StateObject(
+            wrappedValue: PendingDeletionController(commit: { row in store.delete(row.transcript) })
+        )
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -35,8 +51,8 @@ struct HistoryView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            if let pendingDeletion {
-                undoBar(for: pendingDeletion)
+            if let pending = pendingDeletion.pending {
+                undoBar(for: pending)
             }
         }
         .background(Theme.Window.ink)
@@ -45,24 +61,30 @@ struct HistoryView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
             reload()
         }
+        // `TranscriptStore` has no `@Published` properties of its own, so
+        // `add`/`delete` call `objectWillChange.send()` explicitly — this is
+        // what lets a completed dictation, or a pending deletion committing
+        // on its own timeout, update this list immediately instead of only
+        // on the next appear/focus.
+        .onReceive(store.objectWillChange) { reload() }
     }
 
     // MARK: - Data
 
-    /// Re-fetches from the store. `TranscriptStore` publishes no change
-    /// events of its own (it has no `@Published` state — `add`/`delete`
-    /// mutate SwiftData directly), so this view refreshes itself on
-    /// appearance and whenever the window regains focus rather than relying
-    /// on Combine to notice a change.
+    private var trimmedQuery: String {
+        query.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Re-fetches from the store.
     ///
     /// A transcript with a deletion still pending (inside the undo window)
     /// is filtered back out even though the store hasn't dropped it yet —
-    /// otherwise a window-focus refresh mid-undo-window would make it
-    /// reappear on its own.
+    /// otherwise a refresh mid-undo-window would make it reappear on its
+    /// own.
     private func reload() {
-        let results = query.isEmpty ? store.all() : store.search(query)
-        if let pendingDeletion {
-            transcripts = results.filter { $0.id != pendingDeletion.transcript.id }
+        let results = trimmedQuery.isEmpty ? store.all() : store.search(query)
+        if let pendingID = pendingDeletion.pending?.transcript.id {
+            transcripts = results.filter { $0.id != pendingID }
         } else {
             transcripts = results
         }
@@ -92,9 +114,12 @@ struct HistoryView: View {
     /// No transcripts at all: the same plain invitation as the dashboard's
     /// empty state. A search that matched nothing instead says so and
     /// names the query, so the reader knows the store isn't actually empty.
+    /// The check is against the *trimmed* query — a search of only spaces
+    /// on an empty store should read as "nothing here yet", not as a
+    /// literal failed match on whitespace.
     private var emptyState: some View {
         Group {
-            if query.isEmpty {
+            if trimmedQuery.isEmpty {
                 Text("Press your shortcut and start talking.")
             } else {
                 Text("No transcripts match “\(query)”.")
@@ -175,40 +200,18 @@ struct HistoryView: View {
 
     // MARK: - Delete + undo
 
-    private struct PendingDeletion {
-        let transcript: Transcript
-        let index: Int
-        let task: Task<Void, Never>
-    }
-
     private func delete(_ transcript: Transcript) {
         guard let index = transcripts.firstIndex(where: { $0.id == transcript.id }) else { return }
         transcripts.remove(at: index)
-
-        // Only one undo slot: if a previous pending deletion hasn't
-        // committed yet, commit it now rather than silently drop it.
-        if let previous = pendingDeletion {
-            previous.task.cancel()
-            store.delete(previous.transcript)
-        }
-
-        let task = Task { @MainActor in
-            try? await Task.sleep(for: Self.undoWindow)
-            guard !Task.isCancelled else { return }
-            store.delete(transcript)
-            pendingDeletion = nil
-        }
-        pendingDeletion = PendingDeletion(transcript: transcript, index: index, task: task)
+        pendingDeletion.delete(PendingRow(transcript: transcript, index: index))
     }
 
     private func undoDelete() {
-        guard let pending = pendingDeletion else { return }
-        pending.task.cancel()
-        transcripts.insert(pending.transcript, at: min(pending.index, transcripts.count))
-        pendingDeletion = nil
+        guard let row = pendingDeletion.undo() else { return }
+        transcripts.insert(row.transcript, at: min(row.index, transcripts.count))
     }
 
-    private func undoBar(for pending: PendingDeletion) -> some View {
+    private func undoBar(for pending: PendingRow) -> some View {
         HStack {
             Text("Transcript deleted.")
                 .foregroundColor(Theme.Window.textDim)

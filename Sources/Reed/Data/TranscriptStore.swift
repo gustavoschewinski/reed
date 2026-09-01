@@ -20,6 +20,10 @@ final class TranscriptStore: ObservableObject {
 
     @discardableResult
     func add(text: String, duration: Double) -> Transcript {
+        // No `@Published` property here to piggyback on — this is a plain
+        // SwiftData wrapper, so views that want to know about new/removed
+        // transcripts (the dashboard, history) have to be told explicitly.
+        objectWillChange.send()
         let transcript = Transcript(text: text, durationSeconds: duration)
         context.insert(transcript)
         do {
@@ -31,6 +35,7 @@ final class TranscriptStore: ObservableObject {
     }
 
     func delete(_ transcript: Transcript) {
+        objectWillChange.send()
         context.delete(transcript)
         do {
             try context.save()

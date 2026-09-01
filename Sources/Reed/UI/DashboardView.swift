@@ -38,6 +38,12 @@ struct DashboardView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
             reload()
         }
+        // `TranscriptStore` has no `@Published` properties of its own (it
+        // wraps SwiftData directly), so `add`/`delete` call
+        // `objectWillChange.send()` explicitly — this is what lets the
+        // dashboard update the moment a dictation lands, instead of only on
+        // the next appear/focus.
+        .onReceive(store.objectWillChange) { reload() }
     }
 
     private func reload() {
