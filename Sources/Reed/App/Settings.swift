@@ -15,7 +15,7 @@ final class Settings: ObservableObject {
         static let hasCompletedOnboarding = "reed.settings.hasCompletedOnboarding"
     }
 
-    private let defaults: UserDefaults
+    private let defaults: any UserDefaultsLike
 
     /// The input device to record from. `nil` means "use the system default".
     @Published var inputDeviceID: AudioDeviceID? {
@@ -44,7 +44,7 @@ final class Settings: ObservableObject {
         didSet { defaults.set(hasCompletedOnboarding, forKey: Keys.hasCompletedOnboarding) }
     }
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: any UserDefaultsLike = UserDefaults.standard) {
         self.defaults = defaults
         defaults.register(defaults: [
             Keys.playSounds: true,

@@ -60,10 +60,17 @@ enum AudioDevices {
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain
         )
-        var name: CFString = "" as CFString
-        var size = UInt32(MemoryLayout<CFString>.size)
-        guard AudioObjectGetPropertyData(id, &address, 0, nil, &size, &name) == noErr
+        // CoreAudio hands back a +1-retained CFString through this out
+        // parameter. Binding it directly to `var name: CFString` makes
+        // Swift's own inout writeback retain it a second time — one leaked
+        // CFString per call, on every Settings appear and window focus.
+        // `Unmanaged` plus `takeRetainedValue()` claims that +1 exactly
+        // once and lets ARC manage it normally from there.
+        var name: Unmanaged<CFString>?
+        var size = UInt32(MemoryLayout<CFString?>.size)
+        guard AudioObjectGetPropertyData(id, &address, 0, nil, &size, &name) == noErr,
+            let name
         else { return nil }
-        return name as String
+        return name.takeRetainedValue() as String
     }
 }

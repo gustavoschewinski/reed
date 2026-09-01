@@ -23,7 +23,19 @@ enum AudioMath {
             throw RecorderError.conversionUnavailable
         }
 
-        var consumed = false
+        // `AVAudioConverterInputBlock` is `@Sendable` by API contract, but
+        // `AVAudioConverter.convert(to:error:withInputFrom:)` only ever
+        // calls it synchronously and repeatedly on the calling thread, for
+        // the duration of this one `convert` call — never concurrently,
+        // and never after this function returns. The compiler can't see
+        // that from the type system alone (`AVAudioPCMBuffer` itself isn't
+        // `Sendable`, and this SDK's AVFAudio isn't `@preconcurrency`-
+        // annotated), so `nonisolated(unsafe)` records that guarantee
+        // explicitly rather than leaving a strict-concurrency warning that
+        // would otherwise be the only ones a clean rebuild produces
+        // besides Item 7's own `AudioDevices.swift` leak.
+        nonisolated(unsafe) var consumed = false
+        nonisolated(unsafe) let inputBuffer = buffer
         var error: NSError?
         converter.convert(to: output, error: &error) { _, status in
             if consumed {
@@ -35,7 +47,7 @@ enum AudioMath {
             }
             consumed = true
             status.pointee = .haveData
-            return buffer
+            return inputBuffer
         }
         if let error { throw error }
 
