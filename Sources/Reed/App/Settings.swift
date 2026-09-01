@@ -8,11 +8,11 @@ import Foundation
 @MainActor
 final class Settings: ObservableObject {
     private enum Keys {
-        static let inputDeviceID = "inputDeviceID"
-        static let playSounds = "playSounds"
-        static let muteWhileRecording = "muteWhileRecording"
-        static let pauseMediaWhileRecording = "pauseMediaWhileRecording"
-        static let hasCompletedOnboarding = "hasCompletedOnboarding"
+        static let inputDeviceID = "reed.settings.inputDeviceID"
+        static let playSounds = "reed.settings.playSounds"
+        static let muteWhileRecording = "reed.settings.muteWhileRecording"
+        static let pauseMediaWhileRecording = "reed.settings.pauseMediaWhileRecording"
+        static let hasCompletedOnboarding = "reed.settings.hasCompletedOnboarding"
     }
 
     private let defaults: UserDefaults

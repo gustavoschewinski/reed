@@ -20,8 +20,12 @@ import Testing
 @MainActor
 @Test func transcriptsComeBackNewestFirst() throws {
     let store = try TranscriptStore(inMemory: true)
-    _ = store.add(text: "first", duration: 1)
-    _ = store.add(text: "second", duration: 1)
+    let first = store.add(text: "first", duration: 1)
+    let second = store.add(text: "second", duration: 1)
+    // Explicit, distinct dates: two inserts on a fast machine can otherwise
+    // tie on `createdAt`, making the sort order arbitrary.
+    first.createdAt = Date(timeIntervalSince1970: 1_000)
+    second.createdAt = Date(timeIntervalSince1970: 2_000)
     #expect(store.all().first?.text == "second")
 }
 
@@ -55,9 +59,15 @@ import Testing
 @MainActor
 @Test func statsInputsMirrorTheStoredRows() throws {
     let store = try TranscriptStore(inMemory: true)
-    _ = store.add(text: "one two three four", duration: 5)
+    let t = store.add(text: "one two three four", duration: 5)
+    // An explicit, known date — not `.now` — so this test can catch an
+    // implementation that hardcodes `createdAt` instead of forwarding the
+    // stored row's actual date.
+    let fixedDate = Date(timeIntervalSince1970: 1_700_000_000)
+    t.createdAt = fixedDate
     let inputs = store.statsInputs()
     #expect(inputs.count == 1)
     #expect(inputs[0].wordCount == 4)
     #expect(inputs[0].durationSeconds == 5)
+    #expect(inputs[0].createdAt == fixedDate)
 }

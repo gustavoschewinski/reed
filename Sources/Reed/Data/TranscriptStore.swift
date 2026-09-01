@@ -22,13 +22,21 @@ final class TranscriptStore: ObservableObject {
     func add(text: String, duration: Double) -> Transcript {
         let transcript = Transcript(text: text, durationSeconds: duration)
         context.insert(transcript)
-        try? context.save()
+        do {
+            try context.save()
+        } catch {
+            NSLog("Reed: failed to save new transcript: \(error)")
+        }
         return transcript
     }
 
     func delete(_ transcript: Transcript) {
         context.delete(transcript)
-        try? context.save()
+        do {
+            try context.save()
+        } catch {
+            NSLog("Reed: failed to save transcript deletion: \(error)")
+        }
     }
 
     func search(_ query: String) -> [Transcript] {
