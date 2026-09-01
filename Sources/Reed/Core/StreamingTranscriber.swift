@@ -1,5 +1,20 @@
 import Foundation
 
+/// What one streaming pass has to show, split into the settled prefix and the
+/// still-revisable tail so the overlay can render them distinctly — confirmed
+/// at `Theme.textPrimary`, hypothesis at `Theme.textDim`.
+struct PreviewUpdate: Sendable, Equatable {
+    let confirmedText: String
+    let hypothesisText: String
+
+    /// The same combined string `AgreementResult.fullText` produced before
+    /// the split existed — space-joined, empty halves dropped. What
+    /// `DictationSession.previewText` publishes.
+    var fullText: String {
+        [confirmedText, hypothesisText].filter { !$0.isEmpty }.joined(separator: " ")
+    }
+}
+
 /// Turns a batch speech model into a live one: repeated bounded passes over the
 /// unconfirmed tail, committing only what consecutive passes agree on.
 actor StreamingTranscriber {
@@ -50,9 +65,11 @@ actor StreamingTranscriber {
 
     /// Runs one agreement pass if enough unprocessed audio has accumulated
     /// ahead of the current seek point.
-    /// Returns the text to display, or nil if nothing changed.
+    /// Returns the confirmed/hypothesis split to display, or nil if nothing
+    /// changed — nil-vs-value semantics carried over unchanged from when
+    /// this returned a plain `String?`.
     @discardableResult
-    func runPassIfDue() async -> String? {
+    func runPassIfDue() async -> PreviewUpdate? {
         let total = trimmedSamples + buffer.count
         guard total >= minimumSamples else { return nil }
 
@@ -88,7 +105,12 @@ actor StreamingTranscriber {
         else { return nil }
 
         guard !result.words.isEmpty else {
-            return result.text.isEmpty ? nil : result.text
+            // No word-level timing at all this pass, so there is nothing to
+            // split on — treated entirely as hypothesis so `fullText` stays
+            // byte-identical to the pre-split behavior (`result.text` alone,
+            // never prefixed with `engine.confirmedText`).
+            guard !result.text.isEmpty else { return nil }
+            return PreviewUpdate(confirmedText: "", hypothesisText: result.text)
         }
 
         let agreement = engine.process(words: result.words, passConfidence: result.confidence)
@@ -96,7 +118,7 @@ actor StreamingTranscriber {
             confirmedSegments += 1
             trimConfirmedAudio()
         }
-        return agreement.fullText
+        return PreviewUpdate(confirmedText: agreement.confirmedText, hypothesisText: agreement.hypothesisText)
     }
 
     /// Produces the authoritative text. Falls back to a clean batch pass when

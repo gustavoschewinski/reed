@@ -5,10 +5,11 @@ import SwiftUI
 /// `previewText` has anything in it, a transcript block and a divider
 /// appear above the control row and the pill grows to fit them.
 ///
-/// NOTE (see task report): `DictationSession.previewText` is a single
-/// merged string — confirmed and hypothesis text are not exposed
-/// separately. Per instruction, `DictationSession` was not touched to split
-/// them, so the whole preview renders at `textPrimary` for v1.
+/// The transcript is one continuous run of text, not two paragraphs:
+/// `session.confirmedText` and `session.hypothesisText` are concatenated
+/// into a single `Text` with per-run colour (`Theme.textPrimary` /
+/// `Theme.textDim`), so the reader sees one sentence whose tail is dimmer —
+/// and watches the boundary walk rightward as the model commits.
 @MainActor
 struct OverlayView: View {
     @ObservedObject var session: DictationSession
@@ -67,10 +68,24 @@ struct OverlayView: View {
         }
     }
 
+    /// Confirmed and hypothesis text as one `Text` value, each run coloured
+    /// independently. A single space joins them — matching
+    /// `PreviewUpdate.fullText`'s join — only when both halves are
+    /// non-empty, so there's never a stray leading/trailing space or a
+    /// doubled one at the boundary.
+    private var transcriptText: Text {
+        let confirmed = session.confirmedText
+        let hypothesis = session.hypothesisText
+        let separator = (!confirmed.isEmpty && !hypothesis.isEmpty) ? " " : ""
+
+        return Text(confirmed).foregroundColor(Theme.textPrimary)
+            + Text(separator)
+            + Text(hypothesis).foregroundColor(Theme.textDim)
+    }
+
     private var transcript: some View {
-        Text(session.previewText)
+        transcriptText
             .font(Theme.transcriptFont)
-            .foregroundColor(Theme.textPrimary)
             .lineSpacing(Theme.transcriptLineSpacing)
             .lineLimit(3, reservesSpace: false)
             .multilineTextAlignment(.leading)

@@ -59,6 +59,11 @@ struct AgreementConfig: Sendable {
 struct AgreementResult: Sendable, Equatable {
     /// Confirmed text plus the current hypothesis — what the overlay renders.
     let fullText: String
+    /// Everything confirmed so far, accumulated across every prior pass.
+    /// Renders at `Theme.textPrimary`.
+    let confirmedText: String
+    /// The current, still-revisable tail. Renders at `Theme.textDim`.
+    let hypothesisText: String
     /// Only what became final in this pass — empty on most passes.
     let newlyConfirmedText: String
 }
@@ -170,13 +175,16 @@ final class WordAgreementEngine {
     }
 
     private func result(hypothesis: [TimedWord], newlyConfirmed: [TimedWord]) -> AgreementResult {
-        let parts = [
-            confirmedWords.map(\.text).joined(separator: " "),
-            hypothesis.map(\.text).joined(separator: " "),
-        ].filter { !$0.isEmpty }
+        let confirmed = confirmedWords.map(\.text).joined(separator: " ")
+        let hypothesisText = hypothesis.map(\.text).joined(separator: " ")
+        // Unchanged from before the confirmed/hypothesis split existed —
+        // existing tests assert on this exact value.
+        let fullText = [confirmed, hypothesisText].filter { !$0.isEmpty }.joined(separator: " ")
 
         return AgreementResult(
-            fullText: parts.joined(separator: " "),
+            fullText: fullText,
+            confirmedText: confirmed,
+            hypothesisText: hypothesisText,
             newlyConfirmedText: newlyConfirmed.map(\.text).joined(separator: " ")
         )
     }

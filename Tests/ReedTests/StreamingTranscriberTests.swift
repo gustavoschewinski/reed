@@ -235,6 +235,35 @@ private let script = "one two. three four. five six. seven eight"
     #expect(lengths.last == 112_000 + 16_000)
 }
 
+@Test func runPassIfDueSplitsConfirmedFromHypothesisAndTheyConcatenateToFullText() async throws {
+    let fake = ScriptedTranscriber(passes: Array(repeating: pass(script), count: 4))
+    let streamer = StreamingTranscriber(transcriber: fake)
+
+    await streamer.begin()
+    await streamer.append([Float](repeating: 0.1, count: 160_000))  // 10 seconds
+
+    // Passes 1-3 haven't reached the confirmation threshold yet: everything
+    // sits in the hypothesis half, and the confirmed half is empty — proving
+    // the split discriminates in both directions, not just when there is
+    // something confirmed to show.
+    for _ in 0..<3 {
+        let update = try #require(await streamer.runPassIfDue())
+        #expect(update.confirmedText.isEmpty)
+        #expect(update.hypothesisText == script)
+        #expect(update.fullText == script)
+    }
+
+    // The 4th pass crosses the confirmation threshold: "one two." moves into
+    // confirmedText, and only the still-revisable remainder stays in
+    // hypothesisText — the two halves are disjoint and concatenate back to
+    // exactly what `fullText` (the old, pre-split return value) used to be.
+    let fourth = try #require(await streamer.runPassIfDue())
+    #expect(fourth.confirmedText == "one two.")
+    #expect(fourth.hypothesisText == "three four. five six. seven eight")
+    #expect(fourth.fullText == "one two. three four. five six. seven eight")
+    #expect(fourth.fullText == script)
+}
+
 @Test func previewSuspendsWhenTheUnconfirmedTailGrowsTooLarge() async throws {
     // Never actually consumed by runPassIfDue() below, since the cap must
     // stop it from calling transcribe at all — available for finish()'s

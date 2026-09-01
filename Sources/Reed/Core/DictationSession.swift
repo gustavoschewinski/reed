@@ -45,12 +45,22 @@ enum DictationCue: Sendable, Equatable {
 ///
 /// This is the integration point for every other piece in `Core`/`System`/
 /// `Data` — but it never touches AppKit windows or views. It only publishes
-/// `state`, `previewText`, and `level`; `AppDelegate` observes those and
-/// shows or hides the overlay. Nothing below `UI/` may know the UI exists.
+/// `state`, `previewText` (and its `confirmedText`/`hypothesisText` split),
+/// and `level`; `AppDelegate` observes those and shows or hides the overlay.
+/// Nothing below `UI/` may know the UI exists.
 @MainActor
 final class DictationSession: ObservableObject {
     @Published private(set) var state: DictationState = .idle
+    /// The combined confirmed + hypothesis text, kept for callers that only
+    /// need the whole preview. `confirmedText`/`hypothesisText` below are the
+    /// same content split, for a renderer that wants to style them
+    /// differently — see `OverlayView`.
     @Published private(set) var previewText: String = ""
+    /// Settled text the agreement engine will not revise further. Renders at
+    /// `Theme.textPrimary`.
+    @Published private(set) var confirmedText: String = ""
+    /// The current, still-revisable tail. Renders at `Theme.textDim`.
+    @Published private(set) var hypothesisText: String = ""
     @Published private(set) var level: Float = 0
 
     private let recorder: any AudioRecording
@@ -159,6 +169,8 @@ final class DictationSession: ObservableObject {
         pendingSamples = []
         appendedSampleCount = 0
         previewText = ""
+        confirmedText = ""
+        hypothesisText = ""
         level = 0
         teardownRan = false
         discardResult = false
@@ -208,6 +220,8 @@ final class DictationSession: ObservableObject {
             passLoopTask?.cancel()
             pendingSamples = []
             previewText = ""
+            confirmedText = ""
+            hypothesisText = ""
             if settings.playSounds { playCue(.cancel) }
             state = .idle
 
@@ -271,6 +285,8 @@ final class DictationSession: ObservableObject {
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !discardResult, !trimmed.isEmpty else {
                 previewText = ""
+                confirmedText = ""
+                hypothesisText = ""
                 state = .idle
                 return
             }
@@ -287,6 +303,8 @@ final class DictationSession: ObservableObject {
         }
 
         previewText = ""
+        confirmedText = ""
+        hypothesisText = ""
         state = .idle
     }
 
@@ -326,14 +344,19 @@ final class DictationSession: ObservableObject {
                 appendedSampleCount += samples.count
             }
 
-            let text = await transcriber.runPassIfDue()
+            let update = await transcriber.runPassIfDue()
             // Checked before publishing: `cancel()` clears `previewText`
-            // synchronously but does not await this loop, so a pass that was
-            // already in flight at that moment must not resurrect stale text
-            // into a session that is now idle (or, worse, already recording
-            // something new) once it finally resumes.
+            // (and the confirmed/hypothesis split) synchronously but does
+            // not await this loop, so a pass that was already in flight at
+            // that moment must not resurrect stale text into a session that
+            // is now idle (or, worse, already recording something new) once
+            // it finally resumes.
             guard !Task.isCancelled else { return }
-            if let text { previewText = text }
+            if let update {
+                previewText = update.fullText
+                confirmedText = update.confirmedText
+                hypothesisText = update.hypothesisText
+            }
 
             let elapsed = ContinuousClock.now - iterationStart
             let remaining = passInterval - elapsed
