@@ -151,6 +151,13 @@ struct OverlayView: View {
         }
         .onAppear {
             withAnimation(reduceMotion ? nil : Theme.appearSpring) { appeared = true }
+            // The panel's content is installed in the same runloop tick as
+            // the .recording transition, so the first render already sees
+            // .recording and onChange below never fires — without this the
+            // clock sits at 0:00 for the whole dictation.
+            if session.state == .recording, recordingStartedAt == nil {
+                recordingStartedAt = .now
+            }
         }
         .onChange(of: session.state) { _, newState in
             switch newState {
