@@ -36,29 +36,67 @@ struct HotkeyInterpreter: Sendable {
         self.holdThreshold = Double(c.seconds) + Double(c.attoseconds) / 1e18
     }
 
-    mutating func keyDown(at time: Double) -> HotkeyGesture? {
-        pressedAt = time
-        holding = false
-        return nil
+    /// `mode` defaults to `.automatic` so every call site (and every test)
+    /// written before `DictationMode` existed keeps meaning exactly what it
+    /// said — this is additive, not a replacement of the original state
+    /// machine below.
+    mutating func keyDown(at time: Double, mode: DictationMode = .automatic) -> HotkeyGesture? {
+        switch mode {
+        case .toggle:
+            // The press itself is the whole gesture — .tap is what
+            // `AppDelegate` already maps to `session.toggle()`, so reusing
+            // it here needs no new gesture case. There is nothing to time,
+            // so pressedAt/holding are left untouched (and irrelevant: a
+            // matching keyUp in this mode ignores them too).
+            return .tap
+        case .holdToTalk:
+            // Starts immediately, no threshold to clear. holding is set so
+            // a mode change mid-press can't strand keyUp — see its .automatic
+            // branch, which only ever reads this when mode is .automatic.
+            pressedAt = time
+            holding = true
+            return .holdStart
+        case .automatic:
+            pressedAt = time
+            holding = false
+            return nil
+        }
     }
 
     /// Called once the threshold should have elapsed, to promote a press to a hold.
-    mutating func elapsedCheck(at time: Double) -> HotkeyGesture? {
+    /// Only `.automatic` ever times a press this way — `.toggle` and
+    /// `.holdToTalk` both resolve their gesture on `keyDown` itself, so
+    /// `HotkeyMonitor` never even schedules the timer that would call this
+    /// in those modes. The `mode` guard here is a second line of defense,
+    /// not the only one.
+    mutating func elapsedCheck(at time: Double, mode: DictationMode = .automatic) -> HotkeyGesture? {
+        guard mode == .automatic else { return nil }
         guard let pressedAt, !holding, time - pressedAt >= holdThreshold else { return nil }
         holding = true
         return .holdStart
     }
 
-    mutating func keyUp(at time: Double) -> HotkeyGesture? {
-        guard let start = pressedAt else { return nil }
-        pressedAt = nil
-
-        if holding {
+    mutating func keyUp(at time: Double, mode: DictationMode = .automatic) -> HotkeyGesture? {
+        switch mode {
+        case .toggle:
+            // Nothing happens on release — the toggle already fired on
+            // keyDown.
+            return nil
+        case .holdToTalk:
             holding = false
+            pressedAt = nil
             return .holdEnd
+        case .automatic:
+            guard let start = pressedAt else { return nil }
+            pressedAt = nil
+
+            if holding {
+                holding = false
+                return .holdEnd
+            }
+            // The timer may never have fired; classify from the release itself.
+            return time - start >= holdThreshold ? .holdEnd : .tap
         }
-        // The timer may never have fired; classify from the release itself.
-        return time - start >= holdThreshold ? .holdEnd : .tap
     }
 }
 
@@ -69,6 +107,13 @@ struct HotkeyInterpreter: Sendable {
 @MainActor
 final class HotkeyMonitor {
     var onGesture: ((HotkeyGesture) -> Void)?
+
+    /// Read fresh on every press and release, so a mode change made in
+    /// Settings mid-session takes effect on the very next gesture rather
+    /// than needing a relaunch. Defaults to `.automatic` — today's
+    /// behavior — for any caller that never wires this up (only
+    /// `AppDelegate`, which always does, constructs a real one).
+    var dictationMode: () -> DictationMode = { .automatic }
 
     private var interpreter = HotkeyInterpreter()
     private var holdTimer: Task<Void, Never>?
@@ -85,14 +130,21 @@ final class HotkeyMonitor {
 
         KeyboardShortcuts.onKeyDown(for: .dictate) { [weak self] in
             guard let self else { return }
-            _ = self.interpreter.keyDown(at: self.now)
+            let mode = self.dictationMode()
+            if let gesture = self.interpreter.keyDown(at: self.now, mode: mode) {
+                self.onGesture?(gesture)
+            }
 
-            // Promote to a hold if the key is still down after the threshold.
+            // Only `.automatic` ever needs to promote a press to a hold
+            // after the threshold — `.toggle` and `.holdToTalk` both
+            // already resolved their gesture above, on the press itself,
+            // so the hold timer must never even run for them.
+            guard mode == .automatic else { return }
             self.holdTimer?.cancel()
             self.holdTimer = Task { @MainActor in
                 try? await Task.sleep(for: HotkeyInterpreter.holdThreshold)
                 guard !Task.isCancelled else { return }
-                if let gesture = self.interpreter.elapsedCheck(at: self.now) {
+                if let gesture = self.interpreter.elapsedCheck(at: self.now, mode: self.dictationMode()) {
                     self.onGesture?(gesture)
                 }
                 self.holdTimer = nil
@@ -103,7 +155,7 @@ final class HotkeyMonitor {
             guard let self else { return }
             self.holdTimer?.cancel()
             self.holdTimer = nil
-            if let gesture = self.interpreter.keyUp(at: self.now) {
+            if let gesture = self.interpreter.keyUp(at: self.now, mode: self.dictationMode()) {
                 self.onGesture?(gesture)
             }
         }

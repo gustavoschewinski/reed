@@ -94,6 +94,13 @@ final class DictationSession: ObservableObject {
     /// matching the `canPaste: Bool?` pattern already used above for
     /// `TextDelivery`.
     private let microphoneAuthorizationOverride: AVAuthorizationStatus?
+    /// Test seam for the actual permission *request* `begin()` now makes
+    /// when it finds `.notDetermined` — same pattern as the override above,
+    /// just for the write side instead of the read side. The real default
+    /// calls `AVCaptureDevice.requestAccess`, which is AVFoundation, not
+    /// AppKit or SwiftUI, so this keeps `DictationSession` free of any UI
+    /// reference exactly as before.
+    private let requestMicrophoneAccess: () async -> Bool
 
     /// Drives `StreamingTranscriber.runPassIfDue()`. Exactly one pass is ever
     /// in flight: the loop awaits each pass to completion before deciding
@@ -150,7 +157,10 @@ final class DictationSession: ObservableObject {
             case .cancel: Cues.cancel()
             }
         },
-        microphoneAuthorizationOverride: AVAuthorizationStatus? = nil
+        microphoneAuthorizationOverride: AVAuthorizationStatus? = nil,
+        requestMicrophoneAccess: @escaping () async -> Bool = {
+            await AVCaptureDevice.requestAccess(for: .audio)
+        }
     ) {
         self.recorder = recorder
         self.transcriber = transcriber
@@ -164,6 +174,7 @@ final class DictationSession: ObservableObject {
         self.passInterval = passInterval
         self.playCue = playCue
         self.microphoneAuthorizationOverride = microphoneAuthorizationOverride
+        self.requestMicrophoneAccess = requestMicrophoneAccess
 
         recorder.onLevel = { [weak self] level in self?.level = level }
         recorder.onSamples = { [weak self] samples in
@@ -185,8 +196,14 @@ final class DictationSession: ObservableObject {
     }
 
     /// `.holdStart` (and `.tap` from idle, via `toggle()`): idle → recording.
-    func begin() {
-        guard state == .idle else { return }
+    ///
+    /// Returns a `Task` only on the `.notDetermined` path, where starting
+    /// has to wait on an actual system permission prompt — production
+    /// callers are free to discard it, same as `end()`'s; tests that need
+    /// to observe the outcome of that prompt await it.
+    @discardableResult
+    func begin() -> Task<Void, Never>? {
+        guard state == .idle else { return nil }
 
         // Checked first, before anything else here touches audio: a
         // microphone that isn't authorized can't record, and attempting it
@@ -198,20 +215,47 @@ final class DictationSession: ObservableObject {
         // collapsed into one generic message.
         switch microphoneAuthorizationStatus() {
         case .authorized:
-            break
+            startRecording()
+            return nil
         case .notDetermined:
-            problem = "Reed needs microphone access to dictate. "
-                + "Open Settings to grant it."
-            return
+            // This is the natural moment to ask — the user just pressed
+            // the shortcut, so a system prompt here is unsurprising. Only
+            // `.notDetermined` can ever trigger `requestAccess`: macOS
+            // itself refuses to prompt again for `.denied`, and asking
+            // when already `.authorized` would be pointless.
+            return Task { [weak self] in
+                guard let self else { return }
+                let granted = await self.requestMicrophoneAccess()
+                if granted {
+                    self.startRecording()
+                } else {
+                    self.problem = "Reed needs microphone access to dictate. "
+                        + "Open Settings to grant it."
+                }
+            }
         case .denied, .restricted:
             problem = "Reed can't hear you — microphone access is off. "
                 + "Open Settings to turn it back on."
-            return
+            return nil
         @unknown default:
             problem = "Reed can't hear you — microphone access is off. "
                 + "Open Settings to turn it back on."
-            return
+            return nil
         }
+    }
+
+    /// The rest of what `begin()` used to do unconditionally, once
+    /// authorization is actually in hand — split out so both the
+    /// synchronous `.authorized` path and the async, post-request path
+    /// (`.notDetermined` → granted) can reach it identically.
+    ///
+    /// The `.notDetermined` path's own outer guard only runs before the
+    /// request is made, not after it resolves — a second `begin()` landing
+    /// while the first is still awaiting the system prompt would otherwise
+    /// find `state` still `.idle` and race this. Re-checked here so only
+    /// the first of two such calls actually starts anything.
+    private func startRecording() {
+        guard state == .idle else { return }
 
         pendingSamples = []
         appendedSampleCount = 0

@@ -134,6 +134,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
+        hotkeyMonitor.dictationMode = { [settings] in settings.dictationMode }
         hotkeyMonitor.onGesture = { [weak self] gesture in
             guard let self else { return }
             // Recording must be impossible until onboarding — and with it,

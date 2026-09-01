@@ -233,7 +233,13 @@ private func makeSession(
     // session that behaves as if the mic were already granted — `swift
     // test` must never depend on (or be blocked by) the real, ambient
     // authorization state of whatever machine runs it.
-    microphoneAuthorizationOverride: AVAuthorizationStatus? = .authorized
+    microphoneAuthorizationOverride: AVAuthorizationStatus? = .authorized,
+    // Only ever consulted on the `.notDetermined` path; a test that
+    // exercises it passes its own closure. `swift test` must never trigger
+    // a real permission prompt, so there is no "ask the real system"
+    // default here the way there is for the override above — every test
+    // that reaches this closure supplies one explicitly.
+    requestMicrophoneAccess: @escaping () async -> Bool = { true }
 ) throws -> DictationSession {
     let store = try store ?? TranscriptStore(inMemory: true)
     let settings = settings ?? Settings(defaults: FakeUserDefaults())
@@ -253,7 +259,8 @@ private func makeSession(
         paste: paste ?? {},
         passInterval: passInterval,
         playCue: cuePlayer.play,
-        microphoneAuthorizationOverride: microphoneAuthorizationOverride
+        microphoneAuthorizationOverride: microphoneAuthorizationOverride,
+        requestMicrophoneAccess: requestMicrophoneAccess
     )
 }
 
@@ -893,6 +900,16 @@ final class StateBox {
     ])
 }
 
+// MARK: - notDetermined microphone requests access (Item: never asked, never stranded)
+
+/// A small mutable box, same pattern as `StateBox` above: lets a
+/// `requestMicrophoneAccess` fake record that it was actually called, from
+/// inside a closure the compiler can't otherwise prove is `Sendable`.
+@MainActor
+private final class RequestedBox {
+    var requested = false
+}
+
 // MARK: - problem (Item 2)
 
 @MainActor
@@ -921,15 +938,60 @@ final class StateBox {
     #expect(session.problem?.contains("microphone") == true || session.problem?.contains("Microphone") == true)
 }
 
-/// `.notDetermined` (never asked) is not the same as `.denied` (said no) —
-/// both block recording, but the sentence has to differ, since "turn it
-/// back on" is wrong for someone who was never asked in the first place.
+/// `.notDetermined` (never asked) is not the same as `.denied` (said no):
+/// `begin()` must actually ask, right there, rather than only report —
+/// that's the fix for the "stranded" class of bug this project keeps
+/// hitting (never asked, so macOS never lists the app, so there is no way
+/// back in without this).
 @MainActor
-@Test func notDeterminedMicrophoneSetsADifferentMessageAndNeverCallsStart() async throws {
+@Test func notDeterminedMicrophoneRequestsAccessBeforeDoingAnythingElse() async throws {
     let recorder = FakeRecorder()
-    let session = try makeSession(recorder: recorder, microphoneAuthorizationOverride: .notDetermined)
+    let requestedBox = RequestedBox()
+    let session = try makeSession(
+        recorder: recorder,
+        microphoneAuthorizationOverride: .notDetermined,
+        requestMicrophoneAccess: {
+            requestedBox.requested = true
+            return true
+        }
+    )
 
-    session.begin()
+    await session.begin()?.value
+
+    #expect(requestedBox.requested)
+}
+
+/// If the system prompt grants access, `begin()` must go on to do the
+/// dictation the user just asked for — not stop at merely knowing the
+/// answer.
+@MainActor
+@Test func aGrantedRequestProceedsToRecording() async throws {
+    let recorder = FakeRecorder()
+    let session = try makeSession(
+        recorder: recorder,
+        microphoneAuthorizationOverride: .notDetermined,
+        requestMicrophoneAccess: { true }
+    )
+
+    await session.begin()?.value
+
+    #expect(session.state == .recording)
+    #expect(recorder.startCount == 1)
+}
+
+/// If the system prompt is refused, `begin()` must set `problem` — same as
+/// the pre-existing denied-microphone path — and never touch the recorder:
+/// asking and being told no is not licence to try anyway.
+@MainActor
+@Test func aRefusedRequestSetsAProblemAndNeverTouchesAudio() async throws {
+    let recorder = FakeRecorder()
+    let session = try makeSession(
+        recorder: recorder,
+        microphoneAuthorizationOverride: .notDetermined,
+        requestMicrophoneAccess: { false }
+    )
+
+    await session.begin()?.value
 
     #expect(session.state == .idle)
     #expect(recorder.startCount == 0)
