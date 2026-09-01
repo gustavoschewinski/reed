@@ -341,11 +341,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             let window = NSWindow(
                 contentRect: NSRect(x: 0, y: 0, width: 720, height: 520),
-                styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                // `.fullSizeContentView` lets the window's SwiftUI content
+                // run all the way under the titlebar, which is what allows
+                // the sidebar's vibrancy material to reach the top edge
+                // instead of stopping below a separate grey titlebar strip.
+                styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                 backing: .buffered,
                 defer: false
             )
             window.title = "Reed"
+            // The title is still set above — VoiceOver, Mission Control and
+            // the Window menu all read it — it's just not drawn, because
+            // `MainWindowView` names the current section itself, on its own
+            // type scale, beside the sidebar rather than above it.
+            window.titleVisibility = .hidden
+            window.titlebarAppearsTransparent = true
+            // Both of these are required for `VisualEffect`'s
+            // `.behindWindow` blending to sample the desktop. Without them
+            // AppKit composites the material against the window's own
+            // opaque backing, the blur silently does nothing, and the
+            // materials just render as flat grey.
+            window.isOpaque = false
+            window.backgroundColor = .clear
             window.isReleasedWhenClosed = false
             window.center()
             // Deliberately not set: leaving `window.appearance` nil is what

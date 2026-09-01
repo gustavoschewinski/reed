@@ -18,6 +18,7 @@ struct HistoryView: View {
     @State private var transcripts: [Transcript] = []
     @State private var query = ""
     @State private var copiedID: UUID?
+    @FocusState private var searchFocused: Bool
 
     /// A row mid-deletion: the transcript itself, plus where it sat in
     /// `transcripts` so undo can put it back in the same place.
@@ -39,8 +40,8 @@ struct HistoryView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            searchField
-            divider
+            searchBar
+            Rule()
 
             Group {
                 if transcripts.isEmpty {
@@ -50,12 +51,18 @@ struct HistoryView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-
+        }
+        // The undo bar floats over the list rather than pushing it up. A
+        // band that displaces the content makes every row jump the moment
+        // you delete one, which is exactly when you're still reading them.
+        .overlay(alignment: .bottom) {
             if let pending = pendingDeletion.pending {
-                undoBar(for: pending)
+                undoToast(for: pending)
+                    .padding(Theme.Space.lg)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
-        .background(Theme.Window.ink)
+        .animation(.easeOut(duration: 0.18), value: pendingDeletion.pending != nil)
         .onAppear(perform: reload)
         .onChange(of: query) { _, _ in reload() }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
@@ -91,23 +98,51 @@ struct HistoryView: View {
         }
     }
 
-    private var divider: some View {
-        Rectangle()
-            .fill(Theme.Window.inkRaised)
-            .frame(height: 1)
-    }
+    // MARK: - Search
 
-    // MARK: - Search field
-
-    private var searchField: some View {
-        HStack(spacing: 8) {
+    /// A borderless field that only draws an outline once it has focus.
+    /// At rest it's a magnifier and a placeholder, which is all a search
+    /// field on a list of forty items needs to be; the outline appears
+    /// exactly when it means something, namely that typing will go here.
+    private var searchBar: some View {
+        HStack(spacing: Theme.Space.sm) {
             Image(systemName: "magnifyingglass")
+                .font(.system(size: 12))
                 .foregroundColor(Theme.Window.textDim)
+
             TextField("Search transcripts", text: $query)
                 .textFieldStyle(.plain)
+                .font(Theme.Typography.body)
                 .foregroundColor(Theme.Window.textPrimary)
+                .focused($searchFocused)
+
+            if !query.isEmpty {
+                IconButton(systemName: "xmark.circle.fill", help: "Clear search") {
+                    query = ""
+                }
+            }
+
+            if !transcripts.isEmpty {
+                Text(countLabel)
+                    .font(Theme.Typography.dataSmall)
+                    .foregroundColor(Theme.Window.textDim)
+            }
         }
-        .padding(12)
+        .padding(.horizontal, Theme.Space.md)
+        .padding(.vertical, Theme.Space.sm)
+        .background {
+            RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous)
+                .strokeBorder(
+                    searchFocused ? Theme.Window.reed : Color.clear,
+                    lineWidth: 1
+                )
+        }
+        .padding(.horizontal, Theme.Space.xl)
+        .padding(.vertical, Theme.Space.md)
+    }
+
+    private var countLabel: String {
+        transcripts.count == 1 ? "1" : transcripts.count.formatted()
     }
 
     // MARK: - Empty states
@@ -121,14 +156,19 @@ struct HistoryView: View {
     private var emptyState: some View {
         Group {
             if trimmedQuery.isEmpty {
-                Text("Press your shortcut and start talking.")
+                EmptyState(
+                    systemImage: "waveform",
+                    title: "Press your shortcut and start talking.",
+                    detail: "Everything you dictate is kept here, on this Mac."
+                )
             } else {
-                Text("No transcripts match “\(query)”.")
+                EmptyState(
+                    systemImage: "magnifyingglass",
+                    title: "No transcripts match “\(query)”.",
+                    detail: "Try a shorter search."
+                )
             }
         }
-        .font(.system(size: 14))
-        .foregroundColor(Theme.Window.textDim)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
     }
 
     // MARK: - List
@@ -137,54 +177,17 @@ struct HistoryView: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
                 ForEach(transcripts, id: \.id) { transcript in
-                    row(transcript)
-                    divider
+                    HistoryRow(
+                        transcript: transcript,
+                        isCopied: copiedID == transcript.id,
+                        copy: { copy(transcript) },
+                        delete: { delete(transcript) }
+                    )
+                    Rule()
                 }
             }
-            .padding(.horizontal, 20)
+            .padding(.horizontal, Theme.Space.xl)
         }
-    }
-
-    private func row(_ transcript: Transcript) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                Text(RelativeDate.string(from: transcript.createdAt))
-                Text("·")
-                Text(DurationFormat.short(transcript.durationSeconds))
-                    .font(Theme.monoFont)
-                Text("·")
-                Text("\(transcript.wordCount) words")
-                    .font(Theme.monoFont)
-
-                Spacer()
-
-                Button {
-                    copy(transcript)
-                } label: {
-                    Image(systemName: copiedID == transcript.id ? "checkmark" : "doc.on.doc")
-                }
-                .buttonStyle(.borderless)
-                .help("Copy")
-
-                Button {
-                    delete(transcript)
-                } label: {
-                    Image(systemName: "trash")
-                }
-                .buttonStyle(.borderless)
-                .help("Delete")
-            }
-            .font(.system(size: 11))
-            .foregroundColor(Theme.Window.textDim)
-
-            Text(transcript.text)
-                .font(.system(size: 13))
-                .foregroundColor(Theme.Window.textPrimary)
-                .lineLimit(3)
-                .multilineTextAlignment(.leading)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .padding(.vertical, 10)
     }
 
     private func copy(_ transcript: Transcript) {
@@ -212,17 +215,95 @@ struct HistoryView: View {
         transcripts.insert(row.transcript, at: min(row.index, transcripts.count))
     }
 
-    private func undoBar(for pending: PendingRow) -> some View {
-        HStack {
+    private func undoToast(for pending: PendingRow) -> some View {
+        HStack(spacing: Theme.Space.lg) {
             Text("Transcript deleted.")
-                .foregroundColor(Theme.Window.textDim)
-            Spacer()
+                .font(Theme.Typography.body)
+                .foregroundColor(Theme.Window.textPrimary)
             Button("Undo") { undoDelete() }
-                .buttonStyle(.borderless)
+                .buttonStyle(.plain)
+                .font(Theme.Typography.body)
                 .foregroundColor(Theme.Window.reed)
         }
-        .font(.system(size: 12))
-        .padding(12)
-        .background(Theme.Window.inkRaised)
+        .padding(.horizontal, Theme.Space.lg)
+        .padding(.vertical, Theme.Space.md)
+        // The one element in the window that floats above another surface,
+        // so it's the one that gets its own material — it has to stay
+        // readable over whichever row it happens to cover.
+        .background {
+            RoundedRectangle(cornerRadius: Theme.Radius.floating, style: .continuous)
+                .fill(.regularMaterial)
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: Theme.Radius.floating, style: .continuous)
+                .strokeBorder(Theme.Window.hairline, lineWidth: 1)
+        }
+    }
+}
+
+// MARK: - Row
+
+/// One transcript: when it happened and how big it was, then the text.
+///
+/// Copy and delete only appear under the pointer. They're always in the
+/// view tree — hidden by opacity, not by a branch — so VoiceOver still
+/// reaches them, and a pointer close enough to click one is by definition
+/// close enough to have revealed it.
+@MainActor
+private struct HistoryRow: View {
+    let transcript: Transcript
+    let isCopied: Bool
+    let copy: () -> Void
+    let delete: () -> Void
+
+    @State private var isHovered = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.sm) {
+            HStack(spacing: Theme.Space.sm) {
+                Text(RelativeDate.string(from: transcript.createdAt))
+                    .font(Theme.Typography.caption)
+                Separator()
+                Text(DurationFormat.short(transcript.durationSeconds))
+                    .font(Theme.Typography.dataSmall)
+                Separator()
+                Text("\(transcript.wordCount) words")
+                    .font(Theme.Typography.dataSmall)
+
+                Spacer()
+
+                HStack(spacing: Theme.Space.xs) {
+                    IconButton(
+                        systemName: isCopied ? "checkmark" : "doc.on.doc",
+                        help: "Copy",
+                        tint: isCopied ? Theme.Window.reed : Theme.Window.textDim,
+                        action: copy
+                    )
+                    IconButton(systemName: "trash", help: "Delete", action: delete)
+                }
+                // Copy holds its checkmark for a beat after the click, and
+                // that confirmation has to survive the pointer leaving.
+                .opacity(isHovered || isCopied ? 1 : 0)
+            }
+            .foregroundColor(Theme.Window.textDim)
+
+            Text(transcript.text)
+                .font(Theme.Typography.body)
+                .foregroundColor(Theme.Window.textPrimary)
+                .lineLimit(3)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.vertical, Theme.Space.md)
+        .hoverHighlight($isHovered)
+    }
+}
+
+/// The dot between two pieces of row metadata.
+private struct Separator: View {
+    var body: some View {
+        Text("·")
+            .font(Theme.Typography.caption)
+            .foregroundColor(Theme.Window.textDim.opacity(0.6))
     }
 }

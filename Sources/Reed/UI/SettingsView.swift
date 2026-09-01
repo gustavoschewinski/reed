@@ -17,6 +17,11 @@ import SwiftUI
 /// recording"), in sentence case — not as switch names ("Enable output
 /// muting").
 ///
+/// Every row is a `Field`: name on the left, control on the right,
+/// explanation underneath. Groups are separated by space and a `GroupLabel`
+/// rather than being boxed — see `Surfaces.swift` for why this window has
+/// no cards.
+///
 /// `accessibilityNotice` below is not a seventh control — it's a
 /// conditional problem indicator, shown only while Accessibility isn't
 /// granted, and it's the one route back for someone who dismissed
@@ -24,8 +29,8 @@ import SwiftUI
 /// `OnboardingModel.openAccessibilitySettings()`'s doc comment for why that
 /// alert can't just be re-shown). Preferences are things the user sets;
 /// this is Reed telling the user something is wrong, so it stays visually
-/// quieter than the six controls — no section header, no reed-tinted
-/// prominent button.
+/// quieter than the six controls — outlined rather than filled, and no
+/// reed-tinted prominent button.
 @MainActor
 struct SettingsView: View {
     @ObservedObject var settings: Settings
@@ -36,9 +41,13 @@ struct SettingsView: View {
     @State private var microphoneStatus: AVAuthorizationStatus = .authorized
     @State private var requestingMicrophoneAccess = false
 
+    /// Pickers are given a fixed width so the two of them line up down the
+    /// right edge instead of each sizing to its own longest option.
+    private let controlWidth: CGFloat = 220
+
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 28) {
+            VStack(alignment: .leading, spacing: Theme.Space.xxl) {
                 // Onboarding promises "Settings will show you what's still
                 // missing" — this and `accessibilityNotice` below are what
                 // makes that literally true, matching Item 2's overlay
@@ -49,109 +58,112 @@ struct SettingsView: View {
                 // without a route back in here, that's exactly the kind of
                 // stranding this project has fought before — the shortcut
                 // says permission is needed, and nothing here explains why.
-                if let microphoneNoticeKind {
-                    microphoneNotice(microphoneNoticeKind)
-                }
-                if !accessibilityGranted {
-                    accessibilityNotice
-                }
-
-                section("Shortcut") {
-                    VStack(alignment: .leading, spacing: 12) {
-                        HStack {
-                            Text("Dictation shortcut")
-                                .foregroundColor(Theme.Window.textPrimary)
-                            Spacer()
-                            KeyboardShortcuts.Recorder(for: .dictate)
+                if microphoneNoticeKind != nil || !accessibilityGranted {
+                    VStack(alignment: .leading, spacing: Theme.Space.md) {
+                        if let microphoneNoticeKind {
+                            microphoneNotice(microphoneNoticeKind)
                         }
-
-                        // Directly under the recorder, not in its own
-                        // section: it modifies what the shortcut above does,
-                        // rather than being an independent preference.
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack {
-                                Text("When you press it")
-                                    .foregroundColor(Theme.Window.textPrimary)
-                                Spacer()
-                                Picker("", selection: $settings.dictationMode) {
-                                    Text("Press to start and stop").tag(DictationMode.toggle)
-                                    Text("Hold to talk").tag(DictationMode.holdToTalk)
-                                    Text("Automatic").tag(DictationMode.automatic)
-                                }
-                                .labelsHidden()
-                                .accessibilityLabel("When you press it")
-                                .frame(maxWidth: 220)
-                            }
-                            if settings.dictationMode == .automatic {
-                                Text("Automatic: a quick press toggles; holding it down talks instead.")
-                                    .font(.system(size: 11))
-                                    .foregroundColor(Theme.Window.textDim)
-                            }
+                        if !accessibilityGranted {
+                            accessibilityNotice
                         }
                     }
                 }
 
-                section("Audio") {
-                    VStack(alignment: .leading, spacing: 16) {
-                        HStack {
-                            Text("Microphone")
-                                .foregroundColor(Theme.Window.textPrimary)
-                            Spacer()
-                            Picker("", selection: $settings.inputDeviceID) {
-                                Text("System Default").tag(AudioDeviceID?.none)
-                                ForEach(devices) { device in
-                                    Text(device.name).tag(AudioDeviceID?.some(device.id))
-                                }
-                                // The saved device may not be plugged in
-                                // right now. Without an entry for it, no tag
-                                // in this Picker would match the current
-                                // selection — and on macOS an unmatched
-                                // selection gets silently reassigned to the
-                                // first item, *writing that back* through
-                                // the two-way binding the instant this view
-                                // renders. Rendering Settings must never
-                                // change a stored setting, so this keeps a
-                                // (disabled — it can't be "chosen" again
-                                // without being plugged back in) placeholder
-                                // entry for exactly that ID, purely so the
-                                // selection still has somewhere to match.
-                                if let missingDeviceID {
-                                    Text("Unavailable Microphone")
-                                        .tag(AudioDeviceID?.some(missingDeviceID))
-                                        .disabled(true)
-                                }
+                group("Shortcut") {
+                    Field(title: "Dictation shortcut") {
+                        KeyboardShortcuts.Recorder(for: .dictate) { _ in
+                            NotificationCenter.default.post(
+                                name: .reedShortcutDidChange, object: nil
+                            )
+                        }
+                    }
+                    Rule()
+                    // Directly under the recorder, not in its own group: it
+                    // modifies what the shortcut above does, rather than
+                    // being an independent preference.
+                    Field(
+                        title: "When you press it",
+                        note: settings.dictationMode == .automatic
+                            ? "A quick press toggles; holding it down talks instead."
+                            : nil
+                    ) {
+                        Picker("", selection: $settings.dictationMode) {
+                            Text("Press to start and stop").tag(DictationMode.toggle)
+                            Text("Hold to talk").tag(DictationMode.holdToTalk)
+                            Text("Automatic").tag(DictationMode.automatic)
+                        }
+                        .labelsHidden()
+                        .accessibilityLabel("When you press it")
+                        .frame(width: controlWidth)
+                    }
+                }
+
+                group("Audio") {
+                    Field(title: "Microphone") {
+                        Picker("", selection: $settings.inputDeviceID) {
+                            Text("System Default").tag(AudioDeviceID?.none)
+                            ForEach(devices) { device in
+                                Text(device.name).tag(AudioDeviceID?.some(device.id))
                             }
+                            // The saved device may not be plugged in right
+                            // now. Without an entry for it, no tag in this
+                            // Picker would match the current selection —
+                            // and on macOS an unmatched selection gets
+                            // silently reassigned to the first item,
+                            // *writing that back* through the two-way
+                            // binding the instant this view renders.
+                            // Rendering Settings must never change a stored
+                            // setting, so this keeps a (disabled — it can't
+                            // be "chosen" again without being plugged back
+                            // in) placeholder entry for exactly that ID,
+                            // purely so the selection still has somewhere
+                            // to match.
+                            if let missingDeviceID {
+                                Text("Unavailable Microphone")
+                                    .tag(AudioDeviceID?.some(missingDeviceID))
+                                    .disabled(true)
+                            }
+                        }
+                        .labelsHidden()
+                        .accessibilityLabel("Microphone")
+                        .frame(width: controlWidth)
+                    }
+                    Rule()
+                    Field(title: "Play sounds while recording") {
+                        toggle($settings.playSounds, label: "Play sounds while recording")
+                    }
+                    Rule()
+                    Field(title: "Mute other audio while recording") {
+                        toggle($settings.muteWhileRecording, label: "Mute other audio while recording")
+                    }
+                    Rule()
+                    Field(
+                        title: "Pause media while recording",
+                        note: "macOS doesn't tell apps whether media is playing, so this "
+                            + "can start something that was paused. Muting already silences "
+                            + "playback while you dictate."
+                    ) {
+                        toggle($settings.pauseMediaWhileRecording, label: "Pause media while recording")
+                    }
+                }
+
+                group("Startup") {
+                    Field(title: "Launch Reed at login") {
+                        Toggle("Launch Reed at login", isOn: $launchAtLogin)
                             .labelsHidden()
-                            .accessibilityLabel("Microphone")
-                            .frame(maxWidth: 220)
-                        }
-
-                        toggleRow("Play sounds while recording", isOn: $settings.playSounds)
-                        toggleRow("Mute other audio while recording", isOn: $settings.muteWhileRecording)
-                        toggleRow(
-                            "Pause media while recording",
-                            isOn: $settings.pauseMediaWhileRecording,
-                            note: "macOS doesn't tell apps whether media is playing, so this "
-                                + "can start something that was paused. Muting already silences "
-                                + "playback while you dictate."
-                        )
+                            .toggleStyle(.switch)
+                            .tint(Theme.Window.reed)
+                            .onChange(of: launchAtLogin) { _, newValue in
+                                LaunchAtLogin.isEnabled = newValue
+                            }
                     }
-                }
-
-                section("Startup") {
-                    Toggle("Launch Reed at login", isOn: $launchAtLogin)
-                        .tint(Theme.Window.reed)
-                        .foregroundColor(Theme.Window.textPrimary)
-                        .onChange(of: launchAtLogin) { _, newValue in
-                            LaunchAtLogin.isEnabled = newValue
-                        }
                 }
             }
-            .padding(32)
+            .padding(.horizontal, Theme.Space.xxl)
+            .padding(.vertical, Theme.Space.xl)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Theme.Window.ink)
         .onAppear(perform: reload)
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
             reload()
@@ -164,6 +176,30 @@ struct SettingsView: View {
         accessibilityGranted = TextDelivery.accessibilityGranted
         microphoneStatus = AVCaptureDevice.authorizationStatus(for: .audio)
     }
+
+    // MARK: - Building blocks
+
+    private func group<Content: View>(
+        _ title: String, @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            GroupLabel(title)
+                .padding(.bottom, Theme.Space.xs)
+            content()
+        }
+    }
+
+    /// The label lives in the `Field` to the left, so the switch itself
+    /// carries only an accessibility label — a visible `Toggle` title here
+    /// would print the same words twice.
+    private func toggle(_ isOn: Binding<Bool>, label: String) -> some View {
+        Toggle(label, isOn: isOn)
+            .labelsHidden()
+            .toggleStyle(.switch)
+            .tint(Theme.Window.reed)
+    }
+
+    // MARK: - Notices
 
     /// What (if anything) `microphoneNotice` should show. `nil` means
     /// authorized — nothing to say. Kept as its own type, rather than two
@@ -187,57 +223,95 @@ struct SettingsView: View {
         }
     }
 
-    /// Mirrors `accessibilityNotice` below — same muted styling, same
+    /// Mirrors `accessibilityNotice` below — same outlined styling, same
     /// "problem indicator, not a seventh control" treatment. Wording
     /// (and the action offered) differs by `kind`: someone who has never
     /// been asked needs a different sentence, and a different fix, than
     /// someone who said no.
     private func microphoneNotice(_ kind: MicrophoneNoticeKind) -> some View {
-        HStack(alignment: .top, spacing: 10) {
+        Group {
+            switch kind {
+            case .notDetermined:
+                notice(
+                    title: "Reed hasn't been given microphone access yet",
+                    detail: "Grant it now, or press the dictation shortcut and Reed will ask.",
+                    // Nothing is broken yet — nobody has been asked. This
+                    // is the one notice that isn't a failure, so it doesn't
+                    // get the alarm colour.
+                    isFailure: false,
+                    actionTitle: "Grant Microphone Access",
+                    action: requestMicrophoneAccess,
+                    actionDisabled: requestingMicrophoneAccess
+                )
+            case .denied:
+                notice(
+                    title: "Reed can't hear you",
+                    detail: "Microphone access is off, so dictation has nothing to transcribe.",
+                    isFailure: true,
+                    actionTitle: "Open System Settings",
+                    action: { SystemSettings.open(.microphone) },
+                    actionDisabled: false
+                )
+            }
+        }
+    }
+
+    /// Shown only while Accessibility isn't granted — see the type's own
+    /// doc comment. Not a failure: dictation still transcribes, the text
+    /// just lands on the clipboard, so this stays dim rather than taking
+    /// the alarm colour.
+    private var accessibilityNotice: some View {
+        notice(
+            title: "Reed can copy but can't paste",
+            detail: "Without Accessibility, dictated text is left on the clipboard "
+                + "instead of typed into the app you're using.",
+            isFailure: false,
+            actionTitle: "Open System Settings",
+            action: { SystemSettings.open(.accessibility) },
+            actionDisabled: false
+        )
+    }
+
+    /// Outlined, never filled. A filled banner would be the only solid
+    /// surface in the window and would read as more important than the
+    /// controls it sits above; the hairline says "read this" without
+    /// shouting.
+    private func notice(
+        title: String,
+        detail: String,
+        isFailure: Bool,
+        actionTitle: String,
+        action: @escaping () -> Void,
+        actionDisabled: Bool
+    ) -> some View {
+        HStack(alignment: .top, spacing: Theme.Space.md) {
             Image(systemName: "exclamationmark.circle")
                 .font(.system(size: 13))
-                .foregroundColor(Theme.Window.textDim)
+                .foregroundColor(isFailure ? Theme.Window.live : Theme.Window.textDim)
 
-            VStack(alignment: .leading, spacing: 4) {
-                switch kind {
-                case .notDetermined:
-                    Text("Reed hasn't been given microphone access yet")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(Theme.Window.textPrimary)
-                    Text("Grant it now, or press the dictation shortcut and Reed will ask.")
-                        .font(.system(size: 11))
-                        .foregroundColor(Theme.Window.textDim)
+            VStack(alignment: .leading, spacing: Theme.Space.xs) {
+                Text(title)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(Theme.Window.textPrimary)
+                Text(detail)
+                    .font(Theme.Typography.caption)
+                    .foregroundColor(Theme.Window.textDim)
+                    .fixedSize(horizontal: false, vertical: true)
 
-                    Button("Grant Microphone Access") {
-                        requestMicrophoneAccess()
-                    }
+                Button(actionTitle, action: action)
                     .buttonStyle(.bordered)
                     .controlSize(.small)
-                    .disabled(requestingMicrophoneAccess)
-                    .padding(.top, 2)
-
-                case .denied:
-                    Text("Reed can't hear you")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(Theme.Window.textPrimary)
-                    Text("Microphone access is off, so dictation has nothing to transcribe.")
-                        .font(.system(size: 11))
-                        .foregroundColor(Theme.Window.textDim)
-
-                    Button("Open System Settings") {
-                        SystemSettings.open(.microphone)
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .padding(.top, 2)
-                }
+                    .disabled(actionDisabled)
+                    .padding(.top, Theme.Space.xs)
             }
 
             Spacer(minLength: 0)
         }
-        .padding(12)
-        .background(Theme.Window.inkRaised.opacity(0.6))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .padding(Theme.Space.md)
+        .overlay {
+            RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous)
+                .strokeBorder(Theme.Window.hairline, lineWidth: 1)
+        }
     }
 
     /// Fires the real system prompt directly — `SettingsView` is UI, so
@@ -255,42 +329,6 @@ struct SettingsView: View {
         }
     }
 
-    /// Shown only while Accessibility isn't granted — see the type's own
-    /// doc comment. Deliberately muted: a small icon, `textDim` body copy,
-    /// and a plain `.bordered` button rather than the reed-tinted
-    /// `.borderedProminent` style the six real controls' actions use.
-    private var accessibilityNotice: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: "exclamationmark.circle")
-                .font(.system(size: 13))
-                .foregroundColor(Theme.Window.textDim)
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Reed can copy but can't paste")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(Theme.Window.textPrimary)
-                Text(
-                    "Without Accessibility, dictated text is left on the clipboard "
-                        + "instead of typed into the app you're using."
-                )
-                .font(.system(size: 11))
-                .foregroundColor(Theme.Window.textDim)
-
-                Button("Open System Settings") {
-                    SystemSettings.open(.accessibility)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .padding(.top, 2)
-            }
-
-            Spacer(minLength: 0)
-        }
-        .padding(12)
-        .background(Theme.Window.inkRaised.opacity(0.6))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-    }
-
     /// The saved input device's ID, but only when it's *not* among the
     /// currently connected `devices` — i.e. only when the picker actually
     /// needs a placeholder entry for it. `nil` whenever the saved device is
@@ -301,33 +339,5 @@ struct SettingsView: View {
             return nil
         }
         return id
-    }
-
-    private func section<Content: View>(
-        _ title: String, @ViewBuilder content: () -> Content
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(title)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundColor(Theme.Window.textDim)
-                .textCase(.uppercase)
-            content()
-        }
-    }
-
-    private func toggleRow(
-        _ title: String, isOn: Binding<Bool>, note: String? = nil
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Toggle(title, isOn: isOn)
-                .tint(Theme.Window.reed)
-                .foregroundColor(Theme.Window.textPrimary)
-            if let note {
-                Text(note)
-                    .font(.system(size: 11))
-                    .foregroundColor(Theme.Window.textDim)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
     }
 }

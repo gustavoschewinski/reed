@@ -67,6 +67,25 @@ enum Theme {
     /// picking one fixed value, while keeping the same colour *roles* as
     /// the overlay above: an ink background, a raised surface, primary/dim
     /// text, `live` for the record state, `reed` as the one accent.
+    ///
+    /// The main window is translucent: an `NSVisualEffectView` blurs the
+    /// desktop behind it (see `VisualEffect`), and these tokens are painted
+    /// *over* that blur. Two consequences shape the values below.
+    ///
+    /// First, `ink` is no longer the background — `scrim` is. An opaque
+    /// fill would hide the very blur it sits on, so the background is a
+    /// partly transparent wash instead. It exists because the material
+    /// alone leaves contrast at the mercy of the user's wallpaper; the
+    /// scrim is what makes the numbers below hold regardless of what is
+    /// behind the window.
+    ///
+    /// Second, every structural line is derived from the *text* colour at
+    /// low opacity rather than being its own grey. On glass a fixed grey
+    /// drifts against whatever shows through; ink-at-opacity stays the same
+    /// family as the type it separates. These are deliberately heavier than
+    /// a hairline would be on an opaque surface — 12% and up, not 6% —
+    /// because a line that reads as a crisp edge on solid white dissolves
+    /// completely over a busy desktop.
     enum Window {
         static let ink = Color.dynamic(light: 0xF7F5F0, dark: 0x0E0E10)
         static let inkRaised = Color.dynamic(light: 0xEAE6DB, dark: 0x1A1A1E)
@@ -74,6 +93,101 @@ enum Theme {
         static let textDim = Color.dynamic(light: 0x6B6B70, dark: 0x8A8A93)
         static let live = Color.dynamic(light: 0xD70015, dark: 0xFF453A)
         static let reed = Color.dynamic(light: 0x9C7A1B, dark: 0xC9A227)
+
+        /// The wash over the vibrancy material — the main window's actual
+        /// background. Dark mode carries slightly more of it: light
+        /// wallpapers show through a dark scrim more aggressively than the
+        /// reverse.
+        static let scrim = Color.dynamic(
+            light: 0xF7F5F0, lightOpacity: 0.62,
+            dark: 0x0E0E10, darkOpacity: 0.66
+        )
+
+        /// Separator between rows and groups.
+        static let hairline = Color.dynamic(
+            light: 0x1C1C1E, lightOpacity: 0.12,
+            dark: 0xF2F2F4, darkOpacity: 0.14
+        )
+
+        /// The one structural line that divides two vibrancy materials
+        /// (sidebar from content) rather than two regions of one surface.
+        /// It has to survive both materials at once, so it carries more
+        /// weight than `hairline`.
+        static let hairlineStrong = Color.dynamic(
+            light: 0x1C1C1E, lightOpacity: 0.16,
+            dark: 0xF2F2F4, darkOpacity: 0.18
+        )
+
+        /// Row hover. Barely there by design: it confirms the pointer is on
+        /// a row, it does not decorate the row.
+        static let hover = Color.dynamic(
+            light: 0x1C1C1E, lightOpacity: 0.05,
+            dark: 0xF2F2F4, darkOpacity: 0.07
+        )
+
+        /// The unfilled part of a measure — the dashboard's comparison
+        /// rules and any other length shown against a total.
+        static let track = Color.dynamic(
+            light: 0x1C1C1E, lightOpacity: 0.16,
+            dark: 0xF2F2F4, darkOpacity: 0.18
+        )
+    }
+
+    // MARK: - Type scale (main window)
+
+    /// One scale for the whole main window, so a size is chosen by role
+    /// rather than by eye at each call site.
+    ///
+    /// The split between `Text` and `Data` is the rule that matters:
+    /// anything the user reads as prose is set in the system sans, and
+    /// anything that is a *quantity* — a duration, a count, a streak, a
+    /// keyboard shortcut — is monospaced. That is not a stylistic tic. It
+    /// makes figures column-align down the history list, stops the
+    /// dashboard's numbers reflowing as they change, and marks at a glance
+    /// which words on screen are values rather than labels.
+    enum Typography {
+        /// The dashboard's one hero figure. The only type on the window
+        /// above 20pt.
+        static let display = Font.system(size: 34, weight: .medium, design: .monospaced)
+        /// Section title in the toolbar.
+        static let title = Font.system(size: 15, weight: .semibold)
+        /// Group label above a set of rows.
+        static let heading = Font.system(size: 11, weight: .medium)
+        /// Default reading size: control labels, transcript previews.
+        static let body = Font.system(size: 13)
+        /// Secondary line under a label; row metadata.
+        static let caption = Font.system(size: 11)
+        /// Sidebar destinations.
+        static let sidebarItem = Font.system(size: 13)
+        /// A quantity inline with body copy.
+        static let data = Font.system(size: 12, weight: .medium, design: .monospaced)
+        /// A quantity standing on its own as a figure.
+        static let dataLarge = Font.system(size: 20, weight: .medium, design: .monospaced)
+        /// A quantity in metadata, at caption size.
+        static let dataSmall = Font.system(size: 11, design: .monospaced)
+    }
+
+    // MARK: - Space
+
+    /// A 4pt spacing scale. Named by step rather than by use so the same
+    /// value can't drift between two views that meant the same gap.
+    enum Space {
+        static let xs: CGFloat = 4
+        static let sm: CGFloat = 8
+        static let md: CGFloat = 12
+        static let lg: CGFloat = 16
+        static let xl: CGFloat = 24
+        static let xxl: CGFloat = 32
+        static let xxxl: CGFloat = 40
+    }
+
+    // MARK: - Radius
+
+    enum Radius {
+        /// Buttons, fields, hovered rows.
+        static let control: CGFloat = 6
+        /// The undo toast — the only floating element in the window.
+        static let floating: CGFloat = 10
     }
 
     static let appearSpring = Animation.spring(response: 0.18, dampingFraction: 0.82)
@@ -122,21 +236,33 @@ extension Color {
     /// used by `Theme.Window`, never by the always-dark overlay tokens
     /// above. Built on `NSColor(name:dynamicProvider:)` because SwiftUI has
     /// no direct "two hex values, pick by appearance" API of its own.
-    static func dynamic(light: UInt32, dark: UInt32) -> Color {
+    ///
+    /// Opacity is baked into the resolved `NSColor` rather than applied by
+    /// a `.opacity()` modifier at the call site, because the two
+    /// appearances need *different* alphas — the same line that reads
+    /// correctly at 12% on white is invisible at 12% on near-black. A
+    /// modifier can only apply one number for both.
+    static func dynamic(
+        light: UInt32, lightOpacity: Double = 1,
+        dark: UInt32, darkOpacity: Double = 1
+    ) -> Color {
         Color(nsColor: NSColor(name: nil) { appearance in
             let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-            return NSColor(hex: isDark ? dark : light)
+            return NSColor(
+                hex: isDark ? dark : light,
+                alpha: isDark ? darkOpacity : lightOpacity
+            )
         })
     }
 }
 
 extension NSColor {
-    convenience init(hex: UInt32) {
+    convenience init(hex: UInt32, alpha: Double = 1) {
         self.init(
             srgbRed: CGFloat((hex >> 16) & 0xFF) / 255,
             green: CGFloat((hex >> 8) & 0xFF) / 255,
             blue: CGFloat(hex & 0xFF) / 255,
-            alpha: 1
+            alpha: CGFloat(alpha)
         )
     }
 }

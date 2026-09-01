@@ -5,6 +5,17 @@ extension KeyboardShortcuts.Name {
     static let dictate = Self("dictate")
 }
 
+extension Notification.Name {
+    /// Posted when the user records a new dictation shortcut.
+    ///
+    /// KeyboardShortcuts posts its own equivalent, but keeps that name
+    /// `internal`, so this is Reed's. `SettingsView` — the only place a
+    /// shortcut can be changed — posts it from the recorder's `onChange`,
+    /// and the sidebar's status footer listens, so the two stay in
+    /// agreement while both are on screen at once.
+    static let reedShortcutDidChange = Notification.Name("reed.shortcutDidChange")
+}
+
 enum HotkeyGesture: Sendable, Equatable {
     /// Quick press and release — toggle recording on or off.
     case tap

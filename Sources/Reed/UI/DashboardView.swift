@@ -5,10 +5,15 @@ import SwiftUI
 ///
 /// Reed's claim is a comparison, not a big asserted figure: you spoke for
 /// this long, and typing the same words would have taken that long. So the
-/// hero here is two horizontal bars (spoken, typed) with the saved
-/// difference called out between them — the number falls out of the
-/// picture instead of being the picture. The 40 words-per-minute assumption
-/// behind "typed" is labelled plainly, not buried.
+/// two measures below the hero are the point — a short brass rule over a
+/// long dim one, where the saving is a *length you can see* before it is a
+/// number you read. The hero figure names what that gap adds up to; the
+/// rules are what make it true rather than asserted.
+///
+/// They are 4pt rules, not 16pt bars. At bar weight the two lengths read
+/// as a chart and invite comparison of their fill colours; at rule weight
+/// they read as measurements, which is what they are. The 40 words-per-
+/// minute assumption behind "typed" is labelled plainly, not buried.
 ///
 /// Below that: quiet supporting figures (words, sessions, streak) and a
 /// hairline 30-day sparkline for rhythm, not precision.
@@ -17,6 +22,12 @@ struct DashboardView: View {
     @ObservedObject var store: TranscriptStore
 
     @State private var inputs: [StatsInput] = []
+    /// Drives the one animation on this tab: the measures drawing
+    /// themselves from zero on first paint. Off under Reduce Motion, where
+    /// they simply start at full length.
+    @State private var measuresDrawn = false
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private let calendar = Calendar.current
     private let sparklineDays = 30
@@ -33,8 +44,10 @@ struct DashboardView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Theme.Window.ink)
-        .onAppear(perform: reload)
+        .onAppear {
+            reload()
+            drawMeasures()
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
             reload()
         }
@@ -50,27 +63,42 @@ struct DashboardView: View {
         inputs = store.statsInputs()
     }
 
+    private func drawMeasures() {
+        guard !measuresDrawn else { return }
+        if reduceMotion {
+            measuresDrawn = true
+        } else {
+            withAnimation(.easeOut(duration: 0.5)) { measuresDrawn = true }
+        }
+    }
+
     // MARK: - Empty state
 
-    /// No zeroed-out tiles, no empty chart — one line inviting the first
+    /// No zeroed-out figures, no empty chart — one line inviting the first
     /// dictation. An empty screen is an invitation to act, not a report
     /// that nothing happened yet.
     private var emptyState: some View {
-        Text("Press your shortcut and start talking.")
-            .font(.system(size: 15))
-            .foregroundColor(Theme.Window.textDim)
-            .frame(maxWidth: .infinity, minHeight: 320, alignment: .center)
+        EmptyState(
+            systemImage: "waveform",
+            title: "Press your shortcut and start talking.",
+            detail: "What you dictate shows up here."
+        )
+        .frame(minHeight: 320)
     }
 
     // MARK: - Content
 
     private var content: some View {
-        VStack(alignment: .leading, spacing: 40) {
+        VStack(alignment: .leading, spacing: Theme.Space.xxl) {
             hero
+            measures
+            Rule()
             figures
+            Rule()
             sparkline
         }
-        .padding(32)
+        .padding(.horizontal, Theme.Space.xxl)
+        .padding(.vertical, Theme.Space.xl)
     }
 
     // MARK: - Hero
@@ -95,45 +123,66 @@ struct DashboardView: View {
         return CGFloat(totalSpokenSeconds / typedSeconds)
     }
 
+    /// The window's one loud element, and the only place `reed` is spent on
+    /// this tab besides the measure below it and the sparkline.
     private var hero: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            comparisonBar(title: "You spoke", duration: totalSpokenSeconds, fraction: spokenFraction, tint: Theme.Window.reed)
+        VStack(alignment: .leading, spacing: Theme.Space.xs) {
+            Text("You saved")
+                .font(Theme.Typography.caption)
+                .foregroundColor(Theme.Window.textDim)
+            Text(DurationFormat.short(savedSeconds))
+                .font(Theme.Typography.display)
+                .foregroundColor(Theme.Window.reed)
+        }
+    }
 
-            HStack(spacing: 6) {
-                Text("saved")
-                    .font(.system(size: 12))
-                    .foregroundColor(Theme.Window.textDim)
-                Text(DurationFormat.short(savedSeconds))
-                    .font(.system(size: 13, weight: .semibold, design: .monospaced))
-                    .foregroundColor(Theme.Window.reed)
-            }
-            .padding(.leading, 2)
+    // MARK: - Measures
 
-            comparisonBar(title: "Typing the same words", duration: typedSeconds, fraction: 1, tint: Theme.Window.inkRaised)
-
+    private var measures: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.lg) {
+            measure(
+                title: "Spoke",
+                duration: totalSpokenSeconds,
+                fraction: spokenFraction,
+                tint: Theme.Window.reed
+            )
+            measure(
+                title: "Typing the same words",
+                duration: typedSeconds,
+                fraction: 1,
+                tint: Theme.Window.track
+            )
             Text("At 40 words a minute.")
-                .font(.system(size: 11))
+                .font(Theme.Typography.caption)
                 .foregroundColor(Theme.Window.textDim)
         }
     }
 
-    private func comparisonBar(title: String, duration: Double, fraction: CGFloat, tint: Color) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+    private func measure(
+        title: String, duration: Double, fraction: CGFloat, tint: Color
+    ) -> some View {
+        VStack(alignment: .leading, spacing: Theme.Space.sm) {
             HStack {
                 Text(title)
-                    .font(.system(size: 12))
+                    .font(Theme.Typography.body)
                     .foregroundColor(Theme.Window.textDim)
                 Spacer()
                 Text(DurationFormat.short(duration))
-                    .font(Theme.monoFont)
+                    .font(Theme.Typography.data)
                     .foregroundColor(Theme.Window.textPrimary)
             }
             GeometryReader { proxy in
-                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                Capsule()
                     .fill(tint)
-                    .frame(width: max(proxy.size.width * fraction, 4), height: 16)
+                    // A measure of zero still shows 2pt of itself. A rule
+                    // that vanishes entirely reads as a rendering failure,
+                    // not as "nothing yet".
+                    .frame(
+                        width: max(proxy.size.width * fraction * (measuresDrawn ? 1 : 0), 2),
+                        height: 4
+                    )
             }
-            .frame(height: 16)
+            .frame(height: 4)
         }
     }
 
@@ -143,20 +192,21 @@ struct DashboardView: View {
     private var streak: Int { Stats.currentStreak(inputs, now: .now, calendar: calendar) }
 
     private var figures: some View {
-        HStack(spacing: 32) {
-            figure(value: "\(totalWords)", label: "words transcribed")
-            figure(value: "\(inputs.count)", label: "sessions")
-            figure(value: "\(streak)", label: "day streak")
+        HStack(alignment: .top, spacing: Theme.Space.xxxl) {
+            figure(value: totalWords.formatted(), label: "words")
+            figure(value: inputs.count.formatted(), label: "sessions")
+            figure(value: streak.formatted(), label: "day streak")
+            Spacer(minLength: 0)
         }
     }
 
     private func figure(value: String, label: String) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: Theme.Space.xs) {
             Text(value)
-                .font(Theme.monoFont)
+                .font(Theme.Typography.dataLarge)
                 .foregroundColor(Theme.Window.textPrimary)
             Text(label)
-                .font(.system(size: 11))
+                .font(Theme.Typography.caption)
                 .foregroundColor(Theme.Window.textDim)
         }
     }
@@ -168,12 +218,16 @@ struct DashboardView: View {
     }
 
     private var sparkline: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Last 30 days")
-                .font(.system(size: 11))
-                .foregroundColor(Theme.Window.textDim)
+        VStack(alignment: .leading, spacing: Theme.Space.md) {
+            HStack {
+                GroupLabel("Last 30 days")
+                Spacer()
+                Text("\(dailyCounts.reduce(0, +).formatted()) words")
+                    .font(Theme.Typography.dataSmall)
+                    .foregroundColor(Theme.Window.textDim)
+            }
             Sparkline(values: dailyCounts, color: Theme.Window.reed)
-                .frame(height: 40)
+                .frame(height: 44)
         }
     }
 }
