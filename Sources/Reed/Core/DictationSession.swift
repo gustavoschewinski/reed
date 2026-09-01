@@ -96,6 +96,14 @@ final class DictationSession: ObservableObject {
     private let canPaste: Bool?
     private let paste: (() -> Void)?
     private let passInterval: Duration
+    /// How long to let the start cue sound before muting the output. The
+    /// cue is ~0.27s; muting the instant it starts (what this used to do)
+    /// silenced it outright, which is why the stop cue was audible and the
+    /// start cue never was.
+    private let startCueDuration: Duration
+    /// The pending delayed mute, so `teardown()` can cancel it when a
+    /// recording ends inside that window.
+    private var muteTask: Task<Void, Never>?
     private let playCue: (DictationCue) -> Void
     /// Test seam for the microphone-authorization check `begin()` runs
     /// before it ever touches the recorder: nil means "ask the real
@@ -164,6 +172,7 @@ final class DictationSession: ObservableObject {
         canPaste: Bool? = nil,
         paste: (() -> Void)? = nil,
         passInterval: Duration = .seconds(1),
+        startCueDuration: Duration = .milliseconds(300),
         playCue: @escaping (DictationCue) -> Void = { cue in
             switch cue {
             case .start: Cues.start()
@@ -186,6 +195,7 @@ final class DictationSession: ObservableObject {
         self.canPaste = canPaste
         self.paste = paste
         self.passInterval = passInterval
+        self.startCueDuration = startCueDuration
         self.playCue = playCue
         self.microphoneAuthorizationOverride = microphoneAuthorizationOverride
         self.requestMicrophoneAccess = requestMicrophoneAccess
@@ -300,10 +310,31 @@ final class DictationSession: ObservableObject {
         if didPauseMedia { mediaControl.pause() }
         DebugLog.log("DictationSession.begin() after media pause, didPauseMedia=\(didPauseMedia)")
 
-        if settings.playSounds { playCue(.start) }
-        DebugLog.log("DictationSession.begin() after cue, played=\(settings.playSounds)")
+        let playedCue = settings.playSounds
+        if playedCue { playCue(.start) }
+        DebugLog.log("DictationSession.begin() after cue, played=\(playedCue)")
 
-        if didMute { volumeControl.mute() }
+        // Muting waits out the cue rather than cutting it off — recording
+        // starts immediately either way, so the only cost is that other
+        // audio stays audible for that fraction of a second.
+        muteTask?.cancel()
+        muteTask = nil
+        if didMute {
+            if playedCue {
+                muteTask = Task { [weak self] in
+                    try? await Task.sleep(for: self?.startCueDuration ?? .zero)
+                    guard let self, !Task.isCancelled else { return }
+                    // No suspension between this check and the mute, so a
+                    // teardown can never interleave and leave the output
+                    // silenced with nothing left to restore it.
+                    guard !self.teardownRan else { return }
+                    self.volumeControl.mute()
+                    DebugLog.log("DictationSession delayed mute applied")
+                }
+            } else {
+                volumeControl.mute()
+            }
+        }
         DebugLog.log("DictationSession.begin() after mute, didMute=\(didMute)")
 
         do {
@@ -525,6 +556,8 @@ final class DictationSession: ObservableObject {
     private func teardown() -> [Float] {
         guard !teardownRan else { return [] }
         teardownRan = true
+        muteTask?.cancel()
+        muteTask = nil
 
         let recorded = recorder.stop()
         if didPauseMedia { mediaControl.resume() }

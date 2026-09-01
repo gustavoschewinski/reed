@@ -227,6 +227,9 @@ private func makeSession(
     canPaste: Bool = true,
     paste: (() -> Void)? = nil,
     passInterval: Duration = .milliseconds(5),
+    // Muting waits out the start cue in production. Tests default to no
+    // wait; the ones that need the mute to *not* land pass a long value.
+    startCueDuration: Duration = .zero,
     cuePlayer: FakeCuePlayer? = nil,
     // Defaults to `.authorized` (not nil/"ask the real system") so every
     // test in this file that doesn't care about authorization gets a
@@ -265,10 +268,23 @@ private func makeSession(
         canPaste: canPaste,
         paste: paste ?? {},
         passInterval: passInterval,
+        startCueDuration: startCueDuration,
         playCue: cuePlayer.play,
         microphoneAuthorizationOverride: microphoneAuthorizationOverride,
         requestMicrophoneAccess: requestMicrophoneAccess
     )
+}
+
+/// Polls until `condition` holds, for work that now completes on a later
+/// tick — the delayed mute. Returns false on timeout so the caller's
+/// `#expect` reports a real failure rather than hanging the suite.
+@MainActor
+private func waitUntil(_ condition: () -> Bool) async -> Bool {
+    for _ in 0..<200 {
+        if condition() { return true }
+        try? await Task.sleep(for: .milliseconds(5))
+    }
+    return condition()
 }
 
 // MARK: - begin
@@ -292,8 +308,10 @@ private func makeSession(
 
     session.begin()
 
-    #expect(volume.mutes == 1)
     #expect(recorder.startCount == 1)
+    // The mute lands a tick later: it waits out the start cue so the cue
+    // is not silenced by the very mute it precedes.
+    #expect(await waitUntil { volume.mutes == 1 })
 }
 
 @MainActor
@@ -827,7 +845,11 @@ final class StateBox {
     #expect(session.state == .idle)
     #expect(media.pauses == 1)
     #expect(media.resumes == 1)
-    #expect(volume.mutes == 1)
+    // The mute waits out the start cue, and this failure unwinds inside
+    // that window: teardown cancels the pending mute, so the output volume
+    // is never touched at all — the strongest form of "left as we found
+    // it". `restore()` still runs, and is a no-op against nothing muted.
+    #expect(volume.mutes == 0)
     #expect(volume.restores == 1)
 }
 
@@ -885,6 +907,7 @@ final class StateBox {
 
     session.begin()
 
+    #expect(await waitUntil { log.events.contains(.mute) })
     #expect(log.events == [.pause, .cue(.start), .mute])
 }
 
@@ -897,15 +920,21 @@ final class StateBox {
     let media = FakeMediaControl(log: log)
     let volume = FakeVolumeControl(log: log)
     let cuePlayer = FakeCuePlayer(log: log)
-    let session = try makeSession(media: media, volume: volume, cuePlayer: cuePlayer)
+    // A cue duration no test will outlast: the mute never lands, which is
+    // itself the point — a recording cancelled inside the cue window must
+    // leave the output volume untouched rather than muted-then-restored.
+    let session = try makeSession(
+        media: media, volume: volume, startCueDuration: .seconds(60), cuePlayer: cuePlayer
+    )
 
     session.begin()
     session.cancel()
 
     #expect(log.events == [
-        .pause, .cue(.start), .mute,
+        .pause, .cue(.start),
         .cue(.cancel), .resume, .restore,
     ])
+    #expect(volume.mutes == 0)
 }
 
 // MARK: - notDetermined microphone requests access (Item: never asked, never stranded)
