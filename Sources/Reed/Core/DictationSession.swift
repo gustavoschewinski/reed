@@ -537,12 +537,10 @@ final class DictationSession: ObservableObject {
 
         // Item 11: the overlay's last visible frame must show exactly what
         // was delivered, not whatever the live preview last happened to
-        // hold. On the batch-fallback path — the normal path for short
-        // dictations, where streaming never confirmed enough to be
-        // trusted — `finish()`'s authoritative text comes from a clean
-        // batch pass and can differ from the running hypothesis's last
-        // guess, so without this the pill's final frame could show text
-        // that was never actually pasted.
+        // hold. `finish()`'s authoritative text comes from one pass over
+        // the whole recording and routinely differs from the preview's
+        // last guess, so without this the pill's final frame could show
+        // text that was never actually pasted.
         previewText = trimmed
         confirmedText = trimmed
         hypothesisText = ""

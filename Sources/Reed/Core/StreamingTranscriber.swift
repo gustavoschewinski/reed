@@ -26,20 +26,14 @@ actor StreamingTranscriber {
     /// of a pass bounded — roughly 43 ms per second of tail on an M3, so this is
     /// a timing requirement, not merely a memory one.
     private var buffer: [Float] = []
-    /// The whole recording, never trimmed. The batch fallback needs real audio
-    /// for the confirmed region; reconstructing it as silence would transcribe
-    /// the opening of the recording as nothing. 64 KB per second, so a
-    /// five-minute dictation costs about 19 MB — worth it to never lose words.
+    /// The whole recording, never trimmed: `finish()` transcribes all of it
+    /// in one pass. 64 KB per second, so a five-minute dictation costs about
+    /// 19 MB — worth it to never lose words.
     private var wholeRecording: [Float] = []
     /// Samples already discarded from the front, so absolute times stay correct.
     private var trimmedSamples = 0
-    private(set) var confirmedSegments = 0
     /// So the tail-cap warning below logs once per recording, not once per tick.
     private var loggedTailCapped = false
-    /// Set when the tail cap ever forced a confirmation this recording —
-    /// `finish()` then always re-transcribes the whole recording instead of
-    /// trusting the streamed prefix.
-    private var forcedConfirmation = false
 
     /// Parakeet rejects very short inputs; below this a pass is skipped.
     private var minimumSamples: Int { Int(0.3 * reedSampleRate) }
@@ -57,9 +51,7 @@ actor StreamingTranscriber {
         buffer = []
         wholeRecording = []
         trimmedSamples = 0
-        confirmedSegments = 0
         loggedTailCapped = false
-        forcedConfirmation = false
         engine.reset()
     }
 
@@ -93,11 +85,9 @@ actor StreamingTranscriber {
             // budget before agreement ever settles. Suspending the preview
             // here (what this used to do) froze the pill mid-sentence for
             // the rest of the recording; instead, promote the oldest
-            // hypothesis words to confirmed without waiting for agreement,
-            // trim their audio, and mark the streaming result untrusted so
-            // `finish()` re-transcribes the whole recording — the final
-            // transcript never inherits a word confirmed this way.
-            forcedConfirmation = true
+            // hypothesis words to confirmed without waiting for agreement
+            // and trim their audio. Only the preview is affected — the
+            // final transcript never inherits a streamed word.
             let cutTime = Double(trimmedSamples + buffer.count) / reedSampleRate
                 - config.maxUnconfirmedTailSeconds / 2
             engine.forceConfirm(before: cutTime)
@@ -105,8 +95,7 @@ actor StreamingTranscriber {
             if !loggedTailCapped {
                 loggedTailCapped = true
                 NSLog(
-                    "Reed: unconfirmed tail exceeded %.0fs; force-confirming preview text and "
-                        + "using a full batch pass for the final transcript.",
+                    "Reed: unconfirmed tail exceeded %.0fs; force-confirming preview text.",
                     config.maxUnconfirmedTailSeconds)
             }
             return PreviewUpdate(
@@ -139,41 +128,26 @@ actor StreamingTranscriber {
 
         let agreement = engine.process(words: result.words, passConfidence: result.confidence)
         if !agreement.newlyConfirmedText.isEmpty {
-            confirmedSegments += 1
             trimConfirmedAudio()
         }
         return PreviewUpdate(confirmedText: agreement.confirmedText, hypothesisText: agreement.hypothesisText)
     }
 
-    /// Produces the authoritative text. Falls back to a clean batch pass when
-    /// agreement never settled — the preview must never degrade the result.
+    /// Produces the authoritative text: one pass over the whole recording.
+    ///
+    /// The streamed preview is never stitched into the result. Each preview
+    /// pass sees at most `maxUnconfirmedTailSeconds` of audio, so it decides
+    /// words, punctuation and capitalization with a fraction of the context
+    /// the batch pass has, and every window seam is a place to duplicate or
+    /// drop a word. Reusing the streamed prefix used to save the batch pass
+    /// — but Parakeet transcribes at roughly 10 ms per second of audio on
+    /// the Neural Engine (a minute of dictation in about 0.7 s), so the pass
+    /// costs less than the tail-only pass it replaces would have felt like,
+    /// and the preview can be as optimistic as it likes without ever
+    /// degrading what gets pasted.
     func finish() async throws -> String {
-        guard confirmedSegments >= config.minConfirmedSegmentsToTrustStreaming,
-              !forcedConfirmation
-        else {
-            // The real recording, not the trimmed buffer. Trimming has usually
-            // already run once or twice by the time we land here, and padding
-            // that region with silence would transcribe the opening of the
-            // recording as nothing at all.
-            let result = try await transcriber.transcribe(
-                wholeRecording + silencePad, timeOffset: 0)
-            return result.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-
-        let total = trimmedSamples + buffer.count
-        let relative = seekRelative(total: total, context: "finish")
-
-        var tail = ""
-        if relative < buffer.count {
-            let slice = Array(buffer[relative...])
-            let offset = Double(trimmedSamples + relative) / reedSampleRate
-            let result = try await transcriber.transcribe(slice + silencePad, timeOffset: offset)
-            tail = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-
-        return [engine.confirmedText, tail]
-            .filter { !$0.isEmpty }
-            .joined(separator: " ")
+        let result = try await transcriber.transcribe(wholeRecording + silencePad, timeOffset: 0)
+        return result.text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Where, within `buffer`, the next pass (or the finishing tail pass)

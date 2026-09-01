@@ -34,22 +34,29 @@ struct TimedWord: Sendable, Equatable {
     }
 }
 
-/// Thresholds governing when a word stops being a guess. Every value is a
-/// starting point to be tuned against real speech, not a proven constant.
+/// Thresholds governing when a word stops being a guess in the preview.
+///
+/// These only shape what the pill shows while you speak: the final
+/// transcript comes from one pass over the whole recording
+/// (`StreamingTranscriber.finish()`), so a word confirmed too eagerly here
+/// costs at most a visible flicker, never a wrong word in the paste. That is
+/// why the thresholds lean fast rather than safe.
 struct AgreementConfig: Sendable {
     var transcribeInterval: Double = 1.0
-    var confirmationsNeeded: Int = 3
+    /// Two agreeing passes — the classic LocalAgreement-2. Three (what this
+    /// used to be) held every word dim for an extra pass, which read as the
+    /// preview being slow to make up its mind.
+    var confirmationsNeeded: Int = 2
     /// Minimum agreeing-prefix length before a streak starts counting toward
     /// `confirmationsNeeded`. Does NOT bound how many words a confirmation
     /// contains — a confirmation can be as short as one word.
-    var minWordsToConfirm: Int = 5
+    var minWordsToConfirm: Int = 2
     /// Passes below this are displayed but excluded from agreement counting.
     var minPassConfidence: Float = 0.15
     /// Every word at the cut boundary must clear this bar.
     var minBoundaryWordConfidence: Float = 0.6
     var boundaryWordCount: Int = 3
     var trailingSilenceSeconds: Double = 1.0
-    var minConfirmedSegmentsToTrustStreaming: Int = 3
     /// TDT's reported word `startTime` is an estimate carrying emission
     /// delay, not the true acoustic onset — the model can report a word as
     /// starting up to (roughly) this long after the sound of it actually
@@ -62,9 +69,9 @@ struct AgreementConfig: Sendable {
     /// the 1.0s `trailingSilenceSeconds` pad already protects against the
     /// same class of timing error.
     var leadingGuardBandSeconds: Double = 0.1
-    /// Beyond this much unconfirmed audio, preview passes are skipped rather than
-    /// run at a cost that exceeds the tick interval. The final transcription is
-    /// unaffected: finish() falls back to a batch pass over the whole recording.
+    /// Beyond this much unconfirmed audio, the oldest hypothesis words are
+    /// confirmed without agreement so a pass never costs more than the tick
+    /// interval. The final transcription is unaffected either way.
     var maxUnconfirmedTailSeconds: Double = 10.0
 }
 
@@ -195,16 +202,20 @@ final class WordAgreementEngine {
         return length
     }
 
-    /// Cut only at a sentence ender, and only at the third from last: the model
-    /// routinely re-punctuates the two most recent sentences as it hears more.
+    /// Cut at the most recent sentence ender in the agreed prefix, ignoring
+    /// one on the prefix's final word: every pass ends in appended silence,
+    /// and the model tends to close whatever word meets that silence with a
+    /// period that disappears once more speech arrives.
+    ///
+    /// This used to cut only at the third-from-last ender, holding the two
+    /// most recent sentences open because the model re-punctuates them as
+    /// it hears more. That caution guarded the final transcript, which no
+    /// longer inherits anything confirmed here — so it only delayed the
+    /// preview by two whole sentences.
     private func punctuationCut(_ words: [TimedWord]) -> Int {
         let enders: Set<Character> = [".", "!", "?", ";"]
-        let endings = words.indices.filter { i in
-            words[i].text.last.map(enders.contains) ?? false
-        }
-        guard endings.count >= 3 else { return 0 }
-
-        return endings[endings.count - 3] + 1
+        let last = words.dropLast().lastIndex { $0.text.last.map(enders.contains) ?? false }
+        return last.map { $0 + 1 } ?? 0
     }
 
     private func result(hypothesis: [TimedWord], newlyConfirmed: [TimedWord]) -> AgreementResult {

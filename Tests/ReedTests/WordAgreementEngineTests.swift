@@ -13,7 +13,7 @@ private func words(_ text: String, from start: Double = 0, confidence: Float = 1
     }
 }
 
-/// Six words ending in three sentence enders — enough to satisfy both the
+/// Three finished sentences and one still open — enough to satisfy both the
 /// word-count minimum and the punctuation rule in a single pass.
 private let sentence = "one two. three four. five six. seven eight"
 
@@ -24,32 +24,34 @@ private let sentence = "one two. three four. five six. seven eight"
     #expect(result.fullText == "one two. three four. five six. seven eight")
 }
 
-@Test func confirmationRequiresThreeAgreeingPasses() {
+@Test func confirmationRequiresTwoAgreeingPasses() {
     let engine = WordAgreementEngine()
     let w = words(sentence)
 
-    #expect(engine.process(words: w, passConfidence: 1.0).newlyConfirmedText.isEmpty)  // pass 1
-    #expect(engine.process(words: w, passConfidence: 1.0).newlyConfirmedText.isEmpty)  // pass 2
-    #expect(engine.process(words: w, passConfidence: 1.0).newlyConfirmedText.isEmpty)  // pass 3
-    let fourth = engine.process(words: w, passConfidence: 1.0)                          // pass 4
-    #expect(!fourth.newlyConfirmedText.isEmpty)
+    #expect(engine.process(words: w, passConfidence: 1.0).newlyConfirmedText.isEmpty)  // pass 1: baseline
+    #expect(engine.process(words: w, passConfidence: 1.0).newlyConfirmedText.isEmpty)  // pass 2: agreement 1
+    let third = engine.process(words: w, passConfidence: 1.0)                           // pass 3: agreement 2
+    #expect(!third.newlyConfirmedText.isEmpty)
 }
 
-@Test func punctuationRuleKeepsTheLastTwoSentencesAsHypothesis() {
+@Test func punctuationRuleKeepsTheUnfinishedSentenceAsHypothesis() {
     let engine = WordAgreementEngine()
     let w = words(sentence)
-    for _ in 0..<3 { _ = engine.process(words: w, passConfidence: 1.0) }
+    for _ in 0..<2 { _ = engine.process(words: w, passConfidence: 1.0) }
     let result = engine.process(words: w, passConfidence: 1.0)
 
-    // Three enders exist; the cut is at the third from last, so only the first
-    // sentence is confirmed and the final two remain open to revision.
-    #expect(result.newlyConfirmedText == "one two.")
+    // The cut lands on the most recent ender, so every finished sentence is
+    // confirmed and only the one still being spoken stays open to revision.
+    #expect(result.newlyConfirmedText == "one two. three four. five six.")
     #expect(result.fullText == "one two. three four. five six. seven eight")
 }
 
-@Test func fewerThanThreeSentenceEndersConfirmsNothing() {
+@Test func anEnderOnTheLastWordDoesNotCount() {
+    // Every pass ends in silence, and the model closes the word that meets
+    // it with a period more often than not — a cut there would confirm a
+    // word that is still being spoken.
     let engine = WordAgreementEngine()
-    let w = words("alpha bravo. charlie delta echo foxtrot")
+    let w = words("alpha bravo charlie.")
     for _ in 0..<4 { _ = engine.process(words: w, passConfidence: 1.0) }
     #expect(engine.confirmedText.isEmpty)
 }
@@ -63,15 +65,14 @@ private let sentence = "one two. three four. five six. seven eight"
     _ = engine.process(words: a, passConfidence: 1.0)  // pass 2: agreement count 1
     _ = engine.process(words: b, passConfidence: 1.0)  // pass 3: disagreement — resets the counter
     _ = engine.process(words: b, passConfidence: 1.0)  // pass 4: agreement count 1 if reset happened
-    _ = engine.process(words: b, passConfidence: 1.0)  // pass 5: agreement count 2 if reset happened
 
     // A correctly-resetting engine needs one more agreeing pass to confirm.
-    // An engine that never reset would already have reached 3 agreements by
-    // pass 5 (1 carried over from `a` + 2 from `b`) and confirmed early.
+    // An engine that never reset would already have reached 2 agreements by
+    // pass 4 (1 carried over from `a` + 1 from `b`) and confirmed early.
     #expect(engine.confirmedText.isEmpty)
 
-    let sixth = engine.process(words: b, passConfidence: 1.0)  // pass 6: agreement count 3
-    #expect(!sixth.newlyConfirmedText.isEmpty)
+    let fifth = engine.process(words: b, passConfidence: 1.0)  // pass 5: agreement count 2
+    #expect(!fifth.newlyConfirmedText.isEmpty)
 }
 
 @Test func lowConfidencePassIsShownButDoesNotCountTowardAgreement() {
@@ -85,16 +86,15 @@ private let sentence = "one two. three four. five six. seven eight"
     #expect(weak.newlyConfirmedText.isEmpty)
 
     _ = engine.process(words: w, passConfidence: 1.0)  // pass 4: agreement count 1 if reset happened
-    _ = engine.process(words: w, passConfidence: 1.0)  // pass 5: agreement count 2 if reset happened
 
     // A correctly-resetting engine needs one more agreeing pass to confirm.
-    // An engine that never reset would already have reached 3 agreements by
-    // pass 5 (1 carried over from before the weak pass + 2 after it) and
+    // An engine that never reset would already have reached 2 agreements by
+    // pass 4 (1 carried over from before the weak pass + 1 after it) and
     // confirmed early.
     #expect(engine.confirmedText.isEmpty)  // the counter restarted
 
-    let sixth = engine.process(words: w, passConfidence: 1.0)  // pass 6: agreement count 3
-    #expect(!sixth.newlyConfirmedText.isEmpty)
+    let fifth = engine.process(words: w, passConfidence: 1.0)  // pass 5: agreement count 2
+    #expect(!fifth.newlyConfirmedText.isEmpty)
 }
 
 @Test func lowConfidenceBoundaryWordsBlockConfirmation() {
@@ -111,20 +111,19 @@ private let sentence = "one two. three four. five six. seven eight"
 
     _ = engine.process(words: plain, passConfidence: 1.0)
     _ = engine.process(words: shouty, passConfidence: 1.0)
-    _ = engine.process(words: plain, passConfidence: 1.0)
-    let fourth = engine.process(words: shouty, passConfidence: 1.0)
+    let third = engine.process(words: plain, passConfidence: 1.0)
 
-    #expect(!fourth.newlyConfirmedText.isEmpty)  // treated as agreement
+    #expect(!third.newlyConfirmedText.isEmpty)  // treated as agreement
 }
 
 @Test func hypothesisStartTimeMovesToTheFirstUnconfirmedWord() {
     let engine = WordAgreementEngine()
     let w = words(sentence)
-    for _ in 0..<4 { _ = engine.process(words: w, passConfidence: 1.0) }
+    for _ in 0..<3 { _ = engine.process(words: w, passConfidence: 1.0) }
 
-    // "one two." occupies 0.0–1.9; "three" starts at 2.0.
-    #expect(engine.confirmedEndTime == 1.9)
-    #expect(engine.hypothesisStartTime == 2.0)
+    // "one two. three four. five six." occupies 0.0–5.9; "seven" starts at 6.0.
+    #expect(engine.confirmedEndTime == 5.9)
+    #expect(engine.hypothesisStartTime == 6.0)
 }
 
 @Test func resetClearsEverything() {
@@ -149,13 +148,15 @@ private let sentence = "one two. three four. five six. seven eight"
 @Test func confirmedTextAccumulatesAcrossRounds() {
     let engine = WordAgreementEngine()
     let first = words(sentence)
-    for _ in 0..<4 { _ = engine.process(words: first, passConfidence: 1.0) }
-    #expect(engine.confirmedText == "one two.")
+    for _ in 0..<3 { _ = engine.process(words: first, passConfidence: 1.0) }
+    #expect(engine.confirmedText == "one two. three four. five six.")
 
     // A later stretch of speech, offset past the confirmed region.
     let second = words("nine ten. eleven twelve. thirteen fourteen. fifteen", from: 10)
-    for _ in 0..<4 { _ = engine.process(words: second, passConfidence: 1.0) }
-    #expect(engine.confirmedText == "one two. nine ten.")
+    for _ in 0..<3 { _ = engine.process(words: second, passConfidence: 1.0) }
+    #expect(
+        engine.confirmedText
+            == "one two. three four. five six. nine ten. eleven twelve. thirteen fourteen.")
 }
 
 @Test func normalizationKeepsApostrophesSoContractionsDoNotCollideWithLookalikes() {
