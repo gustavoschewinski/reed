@@ -1,3 +1,4 @@
+import AVFoundation
 import AppKit
 import CoreAudio
 import KeyboardShortcuts
@@ -28,15 +29,24 @@ struct SettingsView: View {
     @State private var devices: [AudioInputDevice] = []
     @State private var launchAtLogin = LaunchAtLogin.isEnabled
     @State private var accessibilityGranted = TextDelivery.accessibilityGranted
+    @State private var microphoneDenied = false
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 28) {
+                // Onboarding promises "Settings will show you what's still
+                // missing" — this and `accessibilityNotice` below are what
+                // makes that literally true, matching Item 2's overlay
+                // notice with a persistent one here for whenever the
+                // overlay isn't on screen to see.
+                if microphoneDenied {
+                    microphoneNotice
+                }
                 if !accessibilityGranted {
                     accessibilityNotice
                 }
 
-                section("Hotkey") {
+                section("Shortcut") {
                     HStack {
                         Text("Dictation shortcut")
                             .foregroundColor(Theme.Window.textPrimary)
@@ -110,6 +120,42 @@ struct SettingsView: View {
         devices = AudioDevices.inputs()
         launchAtLogin = LaunchAtLogin.isEnabled
         accessibilityGranted = TextDelivery.accessibilityGranted
+        microphoneDenied = AVCaptureDevice.authorizationStatus(for: .audio) == .denied
+            || AVCaptureDevice.authorizationStatus(for: .audio) == .restricted
+    }
+
+    /// Mirrors `accessibilityNotice` below — same muted styling, same
+    /// "problem indicator, not a seventh control" treatment. Only shown
+    /// once macOS has recorded an explicit denial: `.notDetermined` isn't
+    /// a problem yet, since starting a recording is what triggers that
+    /// system prompt in the first place.
+    private var microphoneNotice: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "exclamationmark.circle")
+                .font(.system(size: 13))
+                .foregroundColor(Theme.Window.textDim)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Reed can't hear you")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(Theme.Window.textPrimary)
+                Text("Microphone access is off, so dictation has nothing to transcribe.")
+                    .font(.system(size: 11))
+                    .foregroundColor(Theme.Window.textDim)
+
+                Button("Open System Settings") {
+                    SystemSettings.open(.microphone)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .padding(.top, 2)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(12)
+        .background(Theme.Window.inkRaised.opacity(0.6))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
     /// Shown only while Accessibility isn't granted — see the type's own

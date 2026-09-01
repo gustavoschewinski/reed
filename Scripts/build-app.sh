@@ -35,5 +35,9 @@ for asset in Reed.icns start.aiff stop.aiff cancel.aiff; do
     [ -f "$ROOT/Resources/$asset" ] && cp "$ROOT/Resources/$asset" "$CONTENTS/Resources/"
 done
 
+# FluidAudio (Apache-2.0) and KeyboardShortcuts (MIT) are compiled into this
+# binary — their licences must ship with it, not just live in the repo.
+cp "$ROOT/THIRD_PARTY_LICENSES.md" "$CONTENTS/Resources/THIRD_PARTY_LICENSES.md"
+
 codesign --force --deep --sign - "$APP"
 echo "Built $APP"
