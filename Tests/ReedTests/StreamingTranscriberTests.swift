@@ -323,7 +323,7 @@ private let script = "one two. three four. five six. seven eight"
     let streamer = StreamingTranscriber(transcriber: fake)
 
     await streamer.begin()
-    await streamer.append([Float](repeating: 0.1, count: 17 * 16_000))  // 17s, past the 15s cap
+    await streamer.append([Float](repeating: 0.1, count: 17 * 16_000))  // 17s, past the 10s cap
     _ = await streamer.runPassIfDue()
     #expect(await fake.receivedLengths.isEmpty)  // the cap tick never transcribes
 

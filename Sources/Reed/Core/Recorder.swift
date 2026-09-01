@@ -56,6 +56,73 @@ enum AudioMath {
     }
 }
 
+/// Resamples a live capture stream to Reed's 16 kHz mono format, keeping
+/// one converter for the whole recording.
+///
+/// A converter built per buffer — what this replaced — has to be flushed
+/// (`.endOfStream`) on every call or it loses its filter tail, which
+/// restarts the resampling filter roughly twelve times a second, at every
+/// chunk boundary, across all of the audio the model ever sees. One
+/// converter lets the filter run continuously instead: `.noDataNow` parks
+/// its tail until the next buffer arrives, and `flush()` collects it once,
+/// at the end.
+///
+/// `@unchecked Sendable` because access is exclusive by ordering, not by a
+/// lock: `append` is only ever called from the audio tap, and `flush` only
+/// after `engine.stop()` has returned — which guarantees the render thread
+/// is not mid-callback.
+final class StreamingResampler: @unchecked Sendable {
+    private let converter: AVAudioConverter
+    private let outputFormat: AVAudioFormat
+    private let ratio: Double
+
+    init?(from input: AVAudioFormat, to output: AVAudioFormat) {
+        guard let converter = AVAudioConverter(from: input, to: output) else { return nil }
+        self.converter = converter
+        self.outputFormat = output
+        self.ratio = output.sampleRate / input.sampleRate
+    }
+
+    /// Converts one captured buffer. The resampler's tail stays inside the
+    /// converter for the next call rather than being flushed here.
+    func append(_ buffer: AVAudioPCMBuffer) throws -> [Float] {
+        nonisolated(unsafe) var consumed = false
+        nonisolated(unsafe) let input = buffer
+        return try run(capacity: AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 1024) { _, status in
+            if consumed {
+                status.pointee = .noDataNow
+                return nil
+            }
+            consumed = true
+            status.pointee = .haveData
+            return input
+        }
+    }
+
+    /// Drains whatever the filter is still holding. Call once, after the
+    /// last `append`, or the final fraction of a second is lost.
+    func flush() throws -> [Float] {
+        try run(capacity: 4096) { _, status in
+            status.pointee = .endOfStream
+            return nil
+        }
+    }
+
+    private func run(
+        capacity: AVAudioFrameCount,
+        block: @escaping AVAudioConverterInputBlock
+    ) throws -> [Float] {
+        guard let output = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: capacity) else {
+            throw RecorderError.conversionUnavailable
+        }
+        var error: NSError?
+        converter.convert(to: output, error: &error, withInputFrom: block)
+        if let error { throw error }
+        guard let channel = output.floatChannelData?[0] else { return [] }
+        return Array(UnsafeBufferPointer(start: channel, count: Int(output.frameLength)))
+    }
+}
+
 enum RecorderError: Error {
     case conversionUnavailable
     case deviceUnavailable
@@ -119,6 +186,9 @@ final class Recorder {
 
     private let engine = AVAudioEngine()
     private let buffer = SampleBuffer()
+    /// Lives for one recording: created in `start()` against the input
+    /// format the microphone actually negotiated, drained in `stop()`.
+    private var resampler: StreamingResampler?
     private let targetFormat = AVAudioFormat(
         commonFormat: .pcmFormatFloat32, sampleRate: reedSampleRate,
         channels: 1, interleaved: false
@@ -166,7 +236,10 @@ final class Recorder {
             throw RecorderError.deviceUnavailable
         }
 
-        let targetFormat = self.targetFormat
+        guard let resampler = StreamingResampler(from: inputFormat, to: targetFormat) else {
+            throw RecorderError.conversionUnavailable
+        }
+        self.resampler = resampler
         let buffer = self.buffer
 
         // `@Sendable` keeps the closure out of MainActor isolation: a plain
@@ -176,7 +249,7 @@ final class Recorder {
         input.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { @Sendable [weak self] pcmBuffer, _ in
             let samples: [Float]
             do {
-                samples = try AudioMath.convert(buffer: pcmBuffer, to: targetFormat)
+                samples = try resampler.append(pcmBuffer)
             } catch {
                 // No onError callback exists (deliberately, per interface scope); log so a
                 // dropped chunk during recording is at least visible instead of silent.
@@ -214,6 +287,17 @@ final class Recorder {
     func stop() -> [Float] {
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
+
+        // `engine.stop()` has returned, so the render thread cannot be
+        // mid-callback and the resampler is ours to drain: its filter is
+        // still holding the last fraction of a second of audio, which no
+        // `append` will ever emit.
+        if let resampler {
+            self.resampler = nil
+            if let tail = try? resampler.flush(), !tail.isEmpty {
+                buffer.append(tail)
+            }
+        }
         return buffer.drain()
     }
 }

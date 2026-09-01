@@ -171,7 +171,12 @@ final class DictationSession: ObservableObject {
         clipboard: any ClipboardStore = SystemClipboard(),
         canPaste: Bool? = nil,
         paste: (() -> Void)? = nil,
-        passInterval: Duration = .seconds(1),
+        // 0.6s, not 1s: a pass costs roughly 43ms per second of unconfirmed
+        // tail, and the tail is capped at 10s, so even the worst pass fits
+        // inside this interval with room to spare. The loop awaits each pass
+        // before sleeping the remainder, so a slower machine simply runs
+        // fewer passes rather than piling them up.
+        passInterval: Duration = .milliseconds(600),
         startCueDuration: Duration = .milliseconds(300),
         playCue: @escaping (DictationCue) -> Void = { cue in
             switch cue {

@@ -65,7 +65,7 @@ struct AgreementConfig: Sendable {
     /// Beyond this much unconfirmed audio, preview passes are skipped rather than
     /// run at a cost that exceeds the tick interval. The final transcription is
     /// unaffected: finish() falls back to a batch pass over the whole recording.
-    var maxUnconfirmedTailSeconds: Double = 15.0
+    var maxUnconfirmedTailSeconds: Double = 10.0
 }
 
 struct AgreementResult: Sendable, Equatable {

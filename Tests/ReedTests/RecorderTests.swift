@@ -62,3 +62,56 @@ import Testing
 @Test func zeroSampleRateAndZeroChannelCountAreBothRejected() {
     #expect(!AudioFormatValidation.isUsable(sampleRate: 0, channelCount: 0))
 }
+
+/// A 1 kHz sine, resampled 44.1 kHz → 16 kHz the way a live capture
+/// arrives: many small buffers, one after another.
+private func chunkedResample(chunkFrames: AVAudioFrameCount) throws -> [Float] {
+    let input = AVAudioFormat(
+        commonFormat: .pcmFormatFloat32, sampleRate: 44_100, channels: 1, interleaved: false)!
+    let output = AVAudioFormat(
+        commonFormat: .pcmFormatFloat32, sampleRate: 16_000, channels: 1, interleaved: false)!
+    let resampler = try #require(StreamingResampler(from: input, to: output))
+
+    var out: [Float] = []
+    var frame = 0
+    while frame < 44_100 {
+        let count = min(chunkFrames, AVAudioFrameCount(44_100 - frame))
+        let buffer = AVAudioPCMBuffer(pcmFormat: input, frameCapacity: count)!
+        buffer.frameLength = count
+        for i in 0..<Int(count) {
+            buffer.floatChannelData![0][i] = sin(2 * .pi * 1_000 * Float(frame + i) / 44_100)
+        }
+        out += try resampler.append(buffer)
+        frame += Int(count)
+    }
+    return out + (try resampler.flush())
+}
+
+@Test func streamingResamplerKeepsEverySecondOfAudio() throws {
+    // One second in, one second out: 16 kHz × 1 s, within a frame or two of
+    // filter latency. The per-buffer converter this replaced dropped or
+    // duplicated frames at every boundary instead.
+    let out = try chunkedResample(chunkFrames: 1024)
+    #expect(abs(out.count - 16_000) <= 64)
+}
+
+@Test func streamingResamplerHasNoDiscontinuityAtChunkBoundaries() throws {
+    // A 1 kHz sine at 16 kHz steps at most sin(2π·1000/16000) ≈ 0.38
+    // between samples. A filter restarted at every chunk boundary — what a
+    // converter built per buffer does — shows jumps well past that.
+    let out = try chunkedResample(chunkFrames: 1024)
+    let biggestStep = zip(out, out.dropFirst()).map { abs($1 - $0) }.max() ?? 0
+    #expect(biggestStep < 0.5)
+}
+
+@Test func resamplingIsIndependentOfHowTheAudioIsChunked() throws {
+    // The same second of audio, delivered in different buffer sizes, must
+    // resample to the same samples: chunking is a transport detail of the
+    // capture callback, not something the model should ever hear.
+    let small = try chunkedResample(chunkFrames: 512)
+    let large = try chunkedResample(chunkFrames: 4096)
+    let common = min(small.count, large.count)
+    #expect(abs(small.count - large.count) <= 64)
+    let worst = (0..<common).map { abs(small[$0] - large[$0]) }.max() ?? 0
+    #expect(worst < 0.02)
+}
