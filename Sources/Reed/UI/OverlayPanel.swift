@@ -104,6 +104,9 @@ final class OverlayPanel: NSPanel {
         stopHotspot.orderFrontRegardless()
         positionStopHotspot()
 
+        DebugLog.log(
+            "OverlayPanel.show() frame=\(frame) isVisible=\(isVisible) screens=\(NSScreen.screens.count)")
+
         if screenParametersObserver == nil {
             screenParametersObserver = NotificationCenter.default.addObserver(
                 forName: NSApplication.didChangeScreenParametersNotification,
@@ -136,6 +139,9 @@ final class OverlayPanel: NSPanel {
         contentView = nil
         contentHeight = Self.minHeight
         stopControlLocalFrame = .zero
+
+        DebugLog.log(
+            "OverlayPanel.hide() frame=\(frame) isVisible=\(isVisible) screens=\(NSScreen.screens.count)")
     }
 
     private func resize(toContentHeight height: CGFloat) {

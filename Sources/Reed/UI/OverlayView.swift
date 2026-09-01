@@ -38,6 +38,13 @@ struct OverlayView: View {
     /// is a local stopwatch, started and cleared off `state` transitions.
     @State private var recordingStartedAt: Date?
     @State private var now: Date = .now
+    /// Whether the settle-in animation has completed. Named for what it
+    /// tracks, not for what it gates: unlike the opacity/scale pair this
+    /// used to drive directly, `appeared == false` no longer means
+    /// invisible — see `pillOpacity`/`pillScale` below. This only ever
+    /// nudges an already-visible pill the rest of the way to fully
+    /// settled; it must never be the difference between something and
+    /// nothing on screen.
     @State private var appeared = false
 
     /// The transcript's true, unclamped content height — however many lines
@@ -64,6 +71,22 @@ struct OverlayView: View {
     /// the pill grow line by line and then stop.
     private var transcriptDisplayHeight: CGFloat { min(measuredTranscriptHeight, threeLineCap) }
 
+    /// Fully settled once `appeared`, but never below `0.92` before that —
+    /// "nearly visible" rather than "invisible" — so a lifecycle callback
+    /// that never runs still leaves a plainly-visible pill, just one that
+    /// never got its last sliver of polish. `reduceMotion` renders fully
+    /// settled immediately: there is no animated state to skip *to*.
+    private var pillOpacity: Double {
+        reduceMotion || appeared ? 1 : 0.92
+    }
+    /// Same reasoning as `pillOpacity`: `0.985`, not `0.94` — close enough
+    /// to full scale that a pill stuck in this state for any reason (no
+    /// `onAppear`, `reduceMotion` misdetected, whatever comes next that
+    /// touches this file) still reads as "on screen", not "broken".
+    private var pillScale: CGFloat {
+        reduceMotion || appeared ? 1 : 0.985
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             if !session.previewText.isEmpty {
@@ -80,8 +103,19 @@ struct OverlayView: View {
         .frame(width: pillWidth)
         .background(Theme.ink)
         .clipShape(RoundedRectangle(cornerRadius: Theme.cornerRadius, style: .continuous))
-        .scaleEffect(appeared ? 1 : 0.94, anchor: .bottom)
-        .opacity(appeared ? 1 : 0)
+        // Item: the pill must be visible the instant this window draws,
+        // not contingent on `onAppear` ever firing. `OverlayPanel` hosts
+        // this in a borderless, non-activating `NSPanel` that never
+        // becomes key — SwiftUI's appearance lifecycle is not reliable
+        // there, and a panel that is `isVisible=true`/`alpha=1.0` but
+        // whose content starts fully transparent, pending a callback that
+        // may never come, is indistinguishable from a bug: a correctly
+        // positioned, opaque window drawing nothing. So the *default* —
+        // before `appeared` ever changes — is "nearly visible", not
+        // invisible: `pillOpacity`/`pillScale` below never return a value
+        // that reads as absent, only "not yet fully settled".
+        .scaleEffect(pillScale, anchor: .bottom)
+        .opacity(pillOpacity)
         // Two triggers, one animation: the transcript block appearing/
         // disappearing, and it growing line by line — both are motion
         // budget item 1 ("appear and grow"), never a separate animation.

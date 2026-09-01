@@ -103,6 +103,8 @@ actor StreamingTranscriber {
         // punctuation, which the punctuation rule depends on.
         guard let result = try? await transcriber.transcribe(slice + silencePad, timeOffset: offset)
         else { return nil }
+        DebugLog.log(
+            "StreamingTranscriber.runPassIfDue() ran, samplesIn=\(slice.count) textLengthOut=\(result.text.count)")
 
         guard !result.words.isEmpty else {
             // No word-level timing at all this pass, so there is nothing to

@@ -51,7 +51,12 @@ enum DictationCue: Sendable, Equatable {
 /// Nothing below `UI/` may know the UI exists.
 @MainActor
 final class DictationSession: ObservableObject {
-    @Published private(set) var state: DictationState = .idle
+    @Published private(set) var state: DictationState = .idle {
+        didSet {
+            guard oldValue != state else { return }
+            DebugLog.log("DictationSession.state \(oldValue) -> \(state)")
+        }
+    }
     /// The combined confirmed + hypothesis text, kept for callers that only
     /// need the whole preview. `confirmedText`/`hypothesisText` below are the
     /// same content split, for a renderer that wants to style them
@@ -74,7 +79,12 @@ final class DictationSession: ObservableObject {
     /// overlay's control row; nothing here references AppKit, SwiftUI, or
     /// any `UI/` type — this only ever publishes a `String?`, same as
     /// `previewText` above.
-    @Published private(set) var problem: String?
+    @Published private(set) var problem: String? {
+        didSet {
+            guard oldValue != problem else { return }
+            DebugLog.log("DictationSession.problem = \(problem.map { "\"\($0)\"" } ?? "nil")")
+        }
+    }
 
     private let recorder: any AudioRecording
     private let transcriber: StreamingTranscriber
@@ -203,6 +213,7 @@ final class DictationSession: ObservableObject {
     /// to observe the outcome of that prompt await it.
     @discardableResult
     func begin() -> Task<Void, Never>? {
+        DebugLog.log("DictationSession.begin() entry, state=\(state)")
         guard state == .idle else { return nil }
 
         // Checked first, before anything else here touches audio: a
@@ -276,11 +287,14 @@ final class DictationSession: ObservableObject {
         // and starting it first (rather than after capture opens) is what
         // keeps as much of it as possible outside the recording window.
         if settings.playSounds { playCue(.start) }
+        DebugLog.log("DictationSession.begin() after cue, played=\(settings.playSounds)")
 
         didMute = settings.muteWhileRecording
         didPauseMedia = settings.pauseMediaWhileRecording
         if didMute { volumeControl.mute() }
+        DebugLog.log("DictationSession.begin() after mute, didMute=\(didMute)")
         if didPauseMedia { mediaControl.pause() }
+        DebugLog.log("DictationSession.begin() after media pause, didPauseMedia=\(didPauseMedia)")
 
         do {
             try recorder.start(deviceID: settings.inputDeviceID)
@@ -295,7 +309,10 @@ final class DictationSession: ObservableObject {
             teardown()
             return
         }
+        DebugLog.log("DictationSession.begin() after recorder.start()")
 
+        // Logged generically by `state`'s own `didSet` below — this is the
+        // "at the moment state becomes .recording" checkpoint.
         state = .recording
 
         // A pass from the just-ended previous recording can still be in
@@ -427,6 +444,7 @@ final class DictationSession: ObservableObject {
             confirmedText = ""
             hypothesisText = ""
             state = .idle
+            DebugLog.log("DictationSession.completeEnd() textLength=0 delivered=false stored=false (finish() threw)")
             return
         }
 
@@ -439,6 +457,8 @@ final class DictationSession: ObservableObject {
             confirmedText = ""
             hypothesisText = ""
             state = .idle
+            DebugLog.log(
+                "DictationSession.completeEnd() textLength=\(trimmed.count) delivered=false stored=false (discarded)")
             return
         }
 
@@ -448,6 +468,7 @@ final class DictationSession: ObservableObject {
             confirmedText = ""
             hypothesisText = ""
             state = .idle
+            DebugLog.log("DictationSession.completeEnd() textLength=0 delivered=false stored=false (empty)")
             return
         }
 
@@ -480,6 +501,8 @@ final class DictationSession: ObservableObject {
         confirmedText = trimmed
         hypothesisText = ""
         state = .idle
+        DebugLog.log(
+            "DictationSession.completeEnd() textLength=\(trimmed.count) delivered=\(effectiveCanPaste) stored=true")
     }
 
     /// The single teardown path every exit from `.recording` — normal,

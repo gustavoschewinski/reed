@@ -39,6 +39,14 @@ Transcription runs on-device using NVIDIA's Parakeet TDT v3 on the Neural Engine
 
 **Nothing happens on the first launch.** The 600 MB model download and the one-time Neural Engine compile (~20 seconds) both happen before Reed is ready — watch for the progress bar rather than assuming it's hung.
 
+**Debug logging.** If something above doesn't explain what you're seeing, launch Reed with debug logging turned on:
+
+```bash
+REED_DEBUG_LOG=1 /Applications/Reed.app/Contents/MacOS/Reed
+```
+
+This writes a step-by-step trace of the dictation pipeline (recording start, mute/media-pause, transcription passes, delivery, overlay show/hide) to `~/Library/Logs/Reed/reed-debug.log`. It's off unless that environment variable is set — a normal launch never creates or writes this file. The log is safe to share: it records lengths, counts, and state names, never the words you dictated.
+
 ## Known limitations
 
 - **Non-QWERTY keyboard layouts.** Pasting works by synthesizing ⌘V using the physical key code for V on a US-ANSI keyboard. On Dvorak, Colemak, or other non-QWERTY layouts, that paste may not fire in every app. The transcribed text is always still on the clipboard, so ⌘V (or Edit → Paste) recovers it.

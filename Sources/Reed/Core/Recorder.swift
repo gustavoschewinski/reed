@@ -125,6 +125,7 @@ final class Recorder {
     )!
 
     func start(deviceID: AudioDeviceID? = nil) throws {
+        DebugLog.log("Recorder.start() entry, deviceID=\(deviceID.map(String.init(describing:)) ?? "default")")
         buffer.reset()
 
         if let deviceID {
@@ -153,6 +154,9 @@ final class Recorder {
 
         let input = engine.inputNode
         let inputFormat = input.outputFormat(forBus: 0)
+        DebugLog.log(
+            "Recorder.start() input format sampleRate=\(inputFormat.sampleRate) channels=\(inputFormat.channelCount)"
+        )
         guard AudioFormatValidation.isUsable(
             sampleRate: inputFormat.sampleRate, channelCount: inputFormat.channelCount
         ) else {
@@ -195,6 +199,7 @@ final class Recorder {
         }
 
         try engine.start()
+        DebugLog.log("Recorder.start() engine started")
     }
 
     /// Stops capture and returns the complete recording.
