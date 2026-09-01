@@ -30,6 +30,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let overlay = OverlayPanel()
     private let hotkeyMonitor = HotkeyMonitor()
     private var stateObservation: AnyCancellable?
+    /// Global escape monitor (Item 3): `OverlayPanel` can never become key
+    /// (see its own doc comment — the synthetic ⌘V a paste depends on would
+    /// otherwise land in the overlay instead of the app being dictated
+    /// into), so escape can only ever be caught this way, not through the
+    /// normal responder chain. `NSEvent.addGlobalMonitorForEvents`, not a
+    /// second `KeyboardShortcuts.Name`: a global *monitor* observes an event
+    /// without consuming it, so escape still reaches whatever app is
+    /// actually focused — closing a dialog there, say — exactly as if Reed
+    /// weren't running. A `KeyboardShortcuts`-registered global *hotkey* for
+    /// bare Escape would do the opposite: Carbon's `RegisterEventHotKey`
+    /// intercepts the key everywhere, unconditionally, which would break
+    /// Escape in every other app for as long as Reed is running. A global
+    /// monitor needs the same Accessibility trust Reed already asks for to
+    /// deliver text (`README`'s "Reed does not need Input Monitoring" stays
+    /// true either way) — without it, this simply never fires, and Quit
+    /// remains the fallback it always was.
+    private var escapeMonitor: Any?
 
     /// The Dashboard/History/Settings window (Task 13). Created lazily on
     /// first open and reused after that — `nil` only ever means "never
@@ -69,23 +86,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         super.init()
     }
 
-    /// Item 1 (ship blocker): the one code path that runs on a normal Quit
-    /// — one click from the menu bar, mid-recording, mutes the machine
-    /// forever without it. `session.prepareForTermination()` unwinds every
-    /// side effect `begin()` may have started (chiefly the output mute)
-    /// synchronously, with no attempt to finish a pass or delivery — there
-    /// is no time left for that, and nothing here needs to succeed at
-    /// transcribing, only at not leaving the Mac silent.
-    ///
-    /// This does NOT cover a crash, force-quit, or logout: none of those
-    /// call `applicationWillTerminate` at all. That case is handled
-    /// separately, at the next launch — see `SystemAudio
-    /// .restoreLeftoverMuteIfNeeded()`, called before this run's own
-    /// `session` (and the `SystemAudio` it owns) can mute anything.
-    func applicationWillTerminate(_ notification: Notification) {
-        session.prepareForTermination()
-    }
-
     func applicationDidFinishLaunching(_ notification: Notification) {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         item.button?.image = NSImage(
@@ -105,11 +105,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // `DictationSession` never touches UI (Ruling 2) — this is the one
         // place that watches its state and shows or hides the overlay.
+        // Combined with `$problem` (Item 2): a denied microphone never
+        // leaves `.idle` at all (there was never anything to record), so
+        // `$state` alone would never fire for it — `$problem` becoming
+        // non-nil is what has to trigger showing the overlay in that case.
         stateObservation = session.$state
-            .removeDuplicates()
-            .sink { [weak self] state in
-                self?.handle(state: state)
+            .combineLatest(session.$problem)
+            .sink { [weak self] state, problem in
+                self?.handle(state: state, problem: problem)
             }
+
+        // Item 3: see `escapeMonitor`'s own doc comment.
+        escapeMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard event.keyCode == 53 else { return }  // kVK_Escape
+            guard let self else { return }
+            switch self.session.state {
+            case .recording, .transcribing: self.session.cancel()
+            case .idle, .delivering: break
+            }
+        }
 
         hotkeyMonitor.onGesture = { [weak self] gesture in
             guard let self else { return }
@@ -134,13 +148,84 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if !settings.hasCompletedOnboarding {
             showOnboardingWindow()
+        } else {
+            // Onboarding's own model-download screen is the only place that
+            // ever called `prepare()` — fine for the very first launch, but
+            // every launch after that skipped it entirely. Without this,
+            // the first dictation of every session paid the full model
+            // load inside the pass loop: the preview froze, `finish()`
+            // blocked on the same load, and the pill sat there with an
+            // empty transcript and a running timer. `ParakeetTranscriber
+            // .prepare()` memoizes on its own, so warming it here is free
+            // if a real dictation gets there first anyway.
+            warmModel()
         }
     }
 
-    private func handle(state: DictationState) {
+    /// Item 1 (ship blocker): the one code path that runs on a normal Quit
+    /// — one click from the menu bar, mid-recording, mutes the machine
+    /// forever without it. `session.prepareForTermination()` unwinds every
+    /// side effect `begin()` may have started (chiefly the output mute)
+    /// synchronously, with no attempt to finish a pass or delivery — there
+    /// is no time left for that, and nothing here needs to succeed at
+    /// transcribing, only at not leaving the Mac silent.
+    ///
+    /// This does NOT cover a crash, force-quit, or logout: none of those
+    /// call `applicationWillTerminate` at all. That case is handled
+    /// separately, at the next launch — see `SystemAudio
+    /// .restoreLeftoverMuteIfNeeded()`, called before this run's own
+    /// `session` (and the `SystemAudio` it owns) can mute anything.
+    func applicationWillTerminate(_ notification: Notification) {
+        session.prepareForTermination()
+    }
+
+    /// Loads the speech model in the background so it's already resident by
+    /// the time the user's first hotkey press of this session needs it. A
+    /// failure here must not crash launch — and per Item 2, must not vanish
+    /// silently either: it's surfaced through `session.problem` the moment
+    /// a real dictation actually needs the model and finds it still isn't
+    /// ready.
+    private func warmModel() {
+        Task { [transcriber] in
+            do {
+                try await transcriber.prepare()
+            } catch {
+                NSLog("Reed: failed to warm the speech model at launch: %@", String(describing: error))
+            }
+        }
+    }
+
+    /// How long a problem stays on screen once dictation is back to
+    /// `.idle`, before the overlay auto-hides — long enough to actually
+    /// read a sentence or two, short enough not to sit there forever.
+    /// Cancelled the moment anything else happens: a fresh `begin()` (which
+    /// also resets `session.problem` to nil) shows the recording pill in
+    /// its place immediately, same as any other state change.
+    private static let problemDisplayDuration: Duration = .seconds(4)
+    private var problemDismissTask: Task<Void, Never>?
+
+    private func handle(state: DictationState, problem: String?) {
+        problemDismissTask?.cancel()
+        problemDismissTask = nil
+
         switch state {
         case .idle:
-            overlay.hide()
+            guard problem != nil else {
+                overlay.hide()
+                return
+            }
+            // A denied microphone never leaves `.idle` (see
+            // `stateObservation`'s comment) — this is the only path that
+            // shows the overlay for it at all, since `.recording` never
+            // happens. Every other cause reaches `.idle` normally, with
+            // the overlay already showing; this just delays the hide long
+            // enough to actually read the message.
+            overlay.show(session: session)
+            problemDismissTask = Task { [weak self] in
+                try? await Task.sleep(for: Self.problemDisplayDuration)
+                guard !Task.isCancelled else { return }
+                self?.overlay.hide()
+            }
         case .recording, .transcribing, .delivering:
             overlay.show(session: session)
         }
@@ -176,9 +261,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let menu = NSMenu()
 
         let start = NSMenuItem(
-            title: "Start Dictation", action: #selector(startDictationFromMenu), keyEquivalent: ""
+            title: startDictationTitle, action: #selector(startDictationFromMenu), keyEquivalent: ""
         )
         start.target = self
+        // `toggle()` — what this item calls — is a no-op while transcribing
+        // or delivering, so the item itself reflects that rather than
+        // offering an action that silently does nothing.
+        start.isEnabled = session.state == .idle || session.state == .recording
         menu.addItem(start)
 
         let open = NSMenuItem(
@@ -208,6 +297,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func startDictationFromMenu() {
         session.toggle()
+    }
+
+    /// `buildMenu()` is rebuilt fresh every time `showMenu()` runs (see its
+    /// own comment), so reading `session.state` here at construction time
+    /// is always current — no separate observer needed just for the menu.
+    private var startDictationTitle: String {
+        session.state == .recording ? "Stop Dictation" : "Start Dictation"
     }
 
     @objc private func openReedFromMenu() {

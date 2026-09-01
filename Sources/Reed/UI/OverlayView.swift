@@ -18,6 +18,20 @@ struct OverlayView: View {
     /// Reports the pill's fitted size up to `OverlayPanel`, which owns the
     /// actual window frame.
     var onHeightChange: (CGFloat) -> Void = { _ in }
+    /// Called when the stop control (Item 3) is clicked. `OverlayPanel`
+    /// wires this to `session.cancel()` — this view never calls into
+    /// `DictationSession` directly, keeping the same one-way dependency
+    /// (`OverlayView` → `DictationSession`, never the reverse) every other
+    /// piece of this file already has.
+    var onCancel: () -> Void = {}
+    /// Reports the stop control's own frame, in this view's local
+    /// coordinate space, up to `OverlayPanel` — which uses it to position a
+    /// small separate click-catching panel exactly over the dot (Item 9:
+    /// the main panel ignores mouse events everywhere else, and a window
+    /// that ignores mouse events receives no hover/move events either, so
+    /// there is no way to carve out one clickable spot from inside a single
+    /// ignoring window).
+    var onStopControlFrame: (CGRect) -> Void = { _ in }
 
     /// `DictationSession` deliberately publishes no timing information —
     /// only `state`, `previewText`, `level` — so the elapsed-time readout
@@ -57,7 +71,11 @@ struct OverlayView: View {
                     .transition(.opacity)
                 divider
             }
-            controlRow
+            if let problem = session.problem {
+                problemRow(problem)
+            } else {
+                controlRow
+            }
         }
         .frame(width: pillWidth)
         .background(Theme.ink)
@@ -75,6 +93,8 @@ struct OverlayView: View {
             }
         )
         .onPreferenceChange(OverlayHeightPreferenceKey.self) { onHeightChange($0) }
+        .onPreferenceChange(StopControlFramePreferenceKey.self) { onStopControlFrame($0) }
+        .coordinateSpace(name: "overlay")
         // A hidden, always-present single-line reference: measures real
         // line height once (font metrics can drift from SwiftUI's own
         // layout engine) so `threeLineCap` reflects actual rendering
@@ -172,6 +192,28 @@ struct OverlayView: View {
             .padding(.bottom, 8)
     }
 
+    /// Replaces `controlRow` while `session.problem` is set (Item 2) — the
+    /// overlay is already on screen at the moment of failure, which is
+    /// where the explanation belongs. Same row height/padding as
+    /// `controlRow` so the pill doesn't jump size just to show it.
+    private func problemRow(_ message: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "exclamationmark.circle.fill")
+                .font(.system(size: 12))
+                .foregroundColor(Theme.live)
+                .accessibilityHidden(true)
+
+            Text(message)
+                .font(.system(size: 12))
+                .foregroundColor(Theme.textDim)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.horizontal, Theme.paddingHorizontal)
+        .padding(.vertical, Theme.paddingVertical)
+    }
+
     private var divider: some View {
         Rectangle()
             .fill(Theme.inkRaised)
@@ -181,10 +223,26 @@ struct OverlayView: View {
 
     private var controlRow: some View {
         HStack(spacing: 12) {
-            Circle()
-                .fill(Theme.live)
-                .frame(width: 8, height: 8)
-                .accessibilityHidden(true)
+            // The stop control (Item 3): same 8pt dot, same placement —
+            // only now it's an actual button, wired to `cancel()`, so a
+            // stalled `finish()` (offline first load, corrupt model cache)
+            // has an exit besides Quit. Restyling it is deliberately left
+            // for later; making it work is the fix.
+            Button(action: onCancel) {
+                Circle()
+                    .fill(Theme.live)
+                    .frame(width: 8, height: 8)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Stop dictation")
+            .background(
+                GeometryReader { proxy in
+                    Color.clear.preference(
+                        key: StopControlFramePreferenceKey.self,
+                        value: proxy.frame(in: .named("overlay"))
+                    )
+                }
+            )
 
             Waveform(session: session)
 
@@ -228,6 +286,15 @@ private struct TranscriptHeightPreferenceKey: PreferenceKey {
 private struct LineHeightPreferenceKey: PreferenceKey {
     static let defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
+/// The stop control's frame, in the pill's own ("overlay"-named)
+/// coordinate space — see `onStopControlFrame`'s doc comment above.
+private struct StopControlFramePreferenceKey: PreferenceKey {
+    static let defaultValue: CGRect = .zero
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
         value = nextValue()
     }
 }

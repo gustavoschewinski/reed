@@ -1,3 +1,4 @@
+import AVFoundation
 import CoreAudio
 import Foundation
 
@@ -62,6 +63,18 @@ final class DictationSession: ObservableObject {
     /// The current, still-revisable tail. Renders at `Theme.textDim`.
     @Published private(set) var hypothesisText: String = ""
     @Published private(set) var level: Float = 0
+    /// What went wrong with the *last* dictation attempt, in plain language
+    /// — or nil if it (or the current one) hasn't hit any trouble. Every
+    /// failure path Reed has looks the same from the outside: the pill
+    /// appears, the waveform idles, nothing gets pasted or stored. This is
+    /// what tells the difference apart — a denied microphone, a model that
+    /// hasn't finished loading, a transcription that came back empty, or
+    /// Accessibility being missing (so the text landed on the clipboard
+    /// instead of being typed in). `AppDelegate` renders it in the
+    /// overlay's control row; nothing here references AppKit, SwiftUI, or
+    /// any `UI/` type — this only ever publishes a `String?`, same as
+    /// `previewText` above.
+    @Published private(set) var problem: String?
 
     private let recorder: any AudioRecording
     private let transcriber: StreamingTranscriber
@@ -74,6 +87,12 @@ final class DictationSession: ObservableObject {
     private let paste: (() -> Void)?
     private let passInterval: Duration
     private let playCue: (DictationCue) -> Void
+    /// Test seam for the microphone-denied branch of `begin()`'s failure
+    /// message: nil means "ask the real system" (`AVCaptureDevice`'s cached
+    /// authorization status — a read, not a request, so this never triggers
+    /// a permission prompt), matching the `canPaste: Bool?` pattern already
+    /// used above for `TextDelivery`.
+    private let microphonePermissionDenied: Bool?
 
     /// Drives `StreamingTranscriber.runPassIfDue()`. Exactly one pass is ever
     /// in flight: the loop awaits each pass to completion before deciding
@@ -129,7 +148,8 @@ final class DictationSession: ObservableObject {
             case .stop: Cues.stop()
             case .cancel: Cues.cancel()
             }
-        }
+        },
+        microphonePermissionDenied: Bool? = nil
     ) {
         self.recorder = recorder
         self.transcriber = transcriber
@@ -142,6 +162,7 @@ final class DictationSession: ObservableObject {
         self.paste = paste
         self.passInterval = passInterval
         self.playCue = playCue
+        self.microphonePermissionDenied = microphonePermissionDenied
 
         recorder.onLevel = { [weak self] level in self?.level = level }
         recorder.onSamples = { [weak self] samples in
@@ -174,7 +195,17 @@ final class DictationSession: ObservableObject {
         level = 0
         teardownRan = false
         discardResult = false
+        problem = nil
         recordingStartedAt = .now
+
+        // Order matters (Item 4): the start cue must play before the mute
+        // takes effect, or it is inaudible under `muteWhileRecording`'s
+        // default of on — the one moment confirmation matters most. It
+        // must also start before capture begins: with muting off, a cue
+        // played into a live microphone risks being transcribed as speech,
+        // and starting it first (rather than after capture opens) is what
+        // keeps as much of it as possible outside the recording window.
+        if settings.playSounds { playCue(.start) }
 
         didMute = settings.muteWhileRecording
         didPauseMedia = settings.pauseMediaWhileRecording
@@ -185,11 +216,11 @@ final class DictationSession: ObservableObject {
             try recorder.start(deviceID: settings.inputDeviceID)
         } catch {
             NSLog("Reed: failed to start recording: %@", String(describing: error))
+            problem = microphoneProblemMessage()
             teardown()
             return
         }
 
-        if settings.playSounds { playCue(.start) }
         state = .recording
 
         // A pass from the just-ended previous recording can still be in
@@ -209,6 +240,27 @@ final class DictationSession: ObservableObject {
         }
     }
 
+    /// What to tell the user when `recorder.start()` throws — the
+    /// likeliest and most silent of Reed's failure causes, since unlike
+    /// the others it happens before the pill would otherwise ever appear.
+    /// Distinguishes "you said no" (denied/restricted — actionable, fixed
+    /// in Settings) from anything else (no microphone attached, another
+    /// app holding it exclusively, etc.) without pretending to know which.
+    private func microphoneProblemMessage() -> String {
+        let denied = microphonePermissionDenied ?? {
+            switch AVCaptureDevice.authorizationStatus(for: .audio) {
+            case .denied, .restricted: return true
+            case .authorized, .notDetermined: return false
+            @unknown default: return false
+            }
+        }()
+        if denied {
+            return "Reed can't hear you — microphone access is off. "
+                + "Open Settings to turn it back on."
+        }
+        return "Reed couldn't start recording. Check that a microphone is connected and try again."
+    }
+
     /// `.recording` → idle immediately: delivers nothing, stores nothing.
     /// `.transcribing` → still walks to idle once `completeEnd()` finishes,
     /// but discards whatever it produces rather than delivering or storing
@@ -216,14 +268,18 @@ final class DictationSession: ObservableObject {
     func cancel() {
         switch state {
         case .recording:
-            defer { teardown() }
             passLoopTask?.cancel()
             pendingSamples = []
             previewText = ""
             confirmedText = ""
             hypothesisText = ""
+            // Cue before teardown (Item 4, same reasoning as `begin()`):
+            // played explicitly here, before the call that restores volume
+            // and resumes media, rather than via a `defer` whose ordering
+            // relative to these statements is easy to misread at a glance.
             if settings.playSounds { playCue(.cancel) }
             state = .idle
+            teardown()
 
         case .transcribing:
             guard !discardResult else { return }
@@ -295,30 +351,72 @@ final class DictationSession: ObservableObject {
             appendedSampleCount = recorded.count
         }
 
+        let text: String
         do {
-            let text = try await transcriber.finish()
-            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !discardResult, !trimmed.isEmpty else {
-                previewText = ""
-                confirmedText = ""
-                hypothesisText = ""
-                state = .idle
-                return
-            }
-
-            state = .delivering
-            await TextDelivery.deliver(trimmed, clipboard: clipboard, canPaste: canPaste, paste: paste)
-
-            let duration = recordingStartedAt.map { Date().timeIntervalSince($0) } ?? 0
-            store.add(text: trimmed, duration: duration)
-
-            if settings.playSounds { playCue(.stop) }
+            text = try await transcriber.finish()
         } catch {
             NSLog("Reed: transcription failed: %@", String(describing: error))
+            // Covers both causes the review calls out together: the model
+            // never finished loading (a genuine `prepare()` failure) and
+            // "still loading" cases severe enough to throw rather than
+            // just run slow — a dictation that succeeds despite a slow
+            // load never reaches this branch at all.
+            problem = "Reed's speech model wasn't ready — try dictating again in a moment."
+            previewText = ""
+            confirmedText = ""
+            hypothesisText = ""
+            state = .idle
+            return
         }
 
-        previewText = ""
-        confirmedText = ""
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // A deliberate cancel (Item 3) is not a failure — nothing to
+        // explain, so `problem` stays whatever `begin()` last reset it to.
+        guard !discardResult else {
+            previewText = ""
+            confirmedText = ""
+            hypothesisText = ""
+            state = .idle
+            return
+        }
+
+        guard !trimmed.isEmpty else {
+            problem = "Reed didn't catch any words — try speaking a bit louder or closer to the mic."
+            previewText = ""
+            confirmedText = ""
+            hypothesisText = ""
+            state = .idle
+            return
+        }
+
+        state = .delivering
+        // Resolved once, here, rather than left for `TextDelivery.deliver`
+        // to decide internally — this is the same fallback it would apply
+        // on its own (`canPaste ?? accessibilityGranted`), just surfaced so
+        // Item 2 can tell whether pasting actually happened.
+        let effectiveCanPaste = canPaste ?? TextDelivery.accessibilityGranted
+        await TextDelivery.deliver(trimmed, clipboard: clipboard, canPaste: effectiveCanPaste, paste: paste)
+        if !effectiveCanPaste {
+            problem = "Accessibility isn't granted, so that text was copied instead of typed in. "
+                + "Paste it with ⌘V, or open Settings to fix this for next time."
+        }
+
+        let duration = recordingStartedAt.map { Date().timeIntervalSince($0) } ?? 0
+        store.add(text: trimmed, duration: duration)
+
+        if settings.playSounds { playCue(.stop) }
+
+        // Item 11: the overlay's last visible frame must show exactly what
+        // was delivered, not whatever the live preview last happened to
+        // hold. On the batch-fallback path — the normal path for short
+        // dictations, where streaming never confirmed enough to be
+        // trusted — `finish()`'s authoritative text comes from a clean
+        // batch pass and can differ from the running hypothesis's last
+        // guess, so without this the pill's final frame could show text
+        // that was never actually pasted.
+        previewText = trimmed
+        confirmedText = trimmed
         hypothesisText = ""
         state = .idle
     }

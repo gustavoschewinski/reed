@@ -26,6 +26,18 @@ final class OverlayPanel: NSPanel {
     /// registered in `show()`, removed in `hide()` so nothing fires, or even
     /// stays registered, while the panel is off-screen.
     private var screenParametersObserver: NSObjectProtocol?
+    /// The stop control's last-reported frame, in this panel's own local
+    /// (SwiftUI, top-left-origin) coordinate space — kept so the hotspot
+    /// can be repositioned from `positionBottomCenter` too, not only from
+    /// `OverlayView`'s own preference callback, since the panel's screen
+    /// position can change (a display change, say) without that view's
+    /// internal layout changing at all.
+    private var stopControlLocalFrame: CGRect = .zero
+    /// A small, separate window layered above this one, positioned exactly
+    /// over the stop control — see its own doc comment for why a second
+    /// window, not a view-level trick, is what "click-through except one
+    /// spot" actually requires (Item 9).
+    private let stopHotspot = ClickCatcherPanel()
 
     init() {
         super.init(
@@ -45,6 +57,12 @@ final class OverlayPanel: NSPanel {
         hidesOnDeactivate = false
         isReleasedWhenClosed = false
         isMovableByWindowBackground = false
+        // Item 9: the pill floats over whatever the user was already
+        // doing, for the entire length of every dictation — it must not
+        // eat clicks meant for the app underneath. `stopHotspot` is the one
+        // carved-out exception, layered above and tracking the stop
+        // control's own measured frame.
+        ignoresMouseEvents = true
     }
 
     /// Never becomes key — see the type comment.
@@ -57,10 +75,20 @@ final class OverlayPanel: NSPanel {
     /// Position is recomputed every call, never cached — the user may have
     /// moved to a different display since the panel last showed.
     func show(session: DictationSession) {
+        stopHotspot.onClick = { session.cancel() }
+
         if contentView == nil {
-            let view = OverlayView(session: session) { [weak self] height in
-                self?.resize(toContentHeight: height)
-            }
+            let view = OverlayView(
+                session: session,
+                onHeightChange: { [weak self] height in
+                    self?.resize(toContentHeight: height)
+                },
+                onCancel: { session.cancel() },
+                onStopControlFrame: { [weak self] frame in
+                    self?.stopControlLocalFrame = frame
+                    self?.positionStopHotspot()
+                }
+            )
             contentView = NSHostingView(rootView: view)
         }
 
@@ -68,6 +96,13 @@ final class OverlayPanel: NSPanel {
         // `orderFrontRegardless`, never `makeKeyAndOrderFront` — showing the
         // panel must not grant it key status.
         orderFrontRegardless()
+        // A child window (rather than a bare `orderFront`) so it always
+        // stays layered directly above this panel and is ordered out
+        // automatically if this panel ever is, without a second lifecycle
+        // to keep in sync by hand.
+        addChildWindow(stopHotspot, ordered: .above)
+        stopHotspot.orderFrontRegardless()
+        positionStopHotspot()
 
         if screenParametersObserver == nil {
             screenParametersObserver = NotificationCenter.default.addObserver(
@@ -94,17 +129,36 @@ final class OverlayPanel: NSPanel {
         screenParametersObserver = nil
 
         orderOut(nil)
+        stopHotspot.orderOut(nil)
         // Dropped rather than reused: the next `show()` should start every
         // piece of per-recording state (the local stopwatch, the waveform's
         // rolling window, the appear animation) fresh.
         contentView = nil
         contentHeight = Self.minHeight
+        stopControlLocalFrame = .zero
     }
 
     private func resize(toContentHeight height: CGFloat) {
         guard height > 0, abs(height - contentHeight) > 0.5 else { return }
         contentHeight = max(height, Self.minHeight)
         positionBottomCenter(height: contentHeight)
+    }
+
+    /// Moves `stopHotspot` to sit exactly over the stop control's last
+    /// measured frame, converted from SwiftUI's top-left-origin local space
+    /// into this panel's current screen-space frame (AppKit's bottom-left
+    /// origin) — called both when that measurement changes and whenever
+    /// this panel's own frame moves, since a frame move alone doesn't imply
+    /// `OverlayView`'s internal layout (and so its preference) changed.
+    private func positionStopHotspot() {
+        guard stopControlLocalFrame.width > 0, stopControlLocalFrame.height > 0 else { return }
+        let panelFrame = frame
+        let x = panelFrame.minX + stopControlLocalFrame.minX
+        let y = panelFrame.minY + (panelFrame.height - stopControlLocalFrame.maxY)
+        stopHotspot.setFrame(
+            NSRect(x: x, y: y, width: stopControlLocalFrame.width, height: stopControlLocalFrame.height),
+            display: true
+        )
     }
 
     /// Recomputed from `NSScreen.main` every call, never cached — covers
@@ -122,6 +176,10 @@ final class OverlayPanel: NSPanel {
 
         guard isVisible, !reduceMotionEnabled else {
             setFrame(newFrame, display: true)
+            // Not animated, so there's no frame-in-flight to keep the
+            // hotspot in step with — safe to reposition it immediately
+            // against this panel's now-final frame.
+            positionStopHotspot()
             return
         }
 
@@ -129,14 +187,88 @@ final class OverlayPanel: NSPanel {
         // so this and the SwiftUI content spring it accompanies are at
         // least stated in one place, even though an `NSWindow` frame can
         // only be driven by Core Animation, never by a SwiftUI `Animation`.
-        NSAnimationContext.runAnimationGroup { context in
+        //
+        // `stopHotspot` animates in the same group, off the same `frame`
+        // this panel is animating toward — computed with `newFrame` here
+        // rather than by re-reading `self.frame` inside
+        // `positionStopHotspot()`, which mid-animation would only see
+        // whatever frame this panel happens to be at on that tick, not
+        // where it's headed.
+        NSAnimationContext.runAnimationGroup { [weak self] context in
+            guard let self else { return }
             context.duration = Theme.panelGrowDuration
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
             animator().setFrame(newFrame, display: true)
+            if stopControlLocalFrame.width > 0, stopControlLocalFrame.height > 0 {
+                let hotspotFrame = NSRect(
+                    x: newFrame.minX + stopControlLocalFrame.minX,
+                    y: newFrame.minY + (newFrame.height - stopControlLocalFrame.maxY),
+                    width: stopControlLocalFrame.width,
+                    height: stopControlLocalFrame.height
+                )
+                stopHotspot.animator().setFrame(hotspotFrame, display: true)
+            }
         }
     }
 
     private var reduceMotionEnabled: Bool {
         NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    }
+}
+
+/// A tiny, otherwise-invisible window that DOES accept mouse events,
+/// layered directly above `OverlayPanel` and kept positioned exactly over
+/// its stop control (see `OverlayPanel.positionStopHotspot()`).
+///
+/// Why a second window at all: `NSWindow.ignoresMouseEvents` is a
+/// window-wide, WindowServer-enforced flag — when it's `true`, the window
+/// receives no mouse events whatsoever, full stop, and they fall through to
+/// whatever's beneath it. There is no equivalent per-VIEW opt-back-in:
+/// making one subview's `hitTest` respond while its window still ignores
+/// events does nothing, because the window is never asked to hit-test in
+/// the first place. A second, small window that does NOT ignore mouse
+/// events — placed only over the one interactive spot — is what actually
+/// achieves "click-through everywhere except here" (Item 9).
+@MainActor
+private final class ClickCatcherPanel: NSPanel {
+    var onClick: (() -> Void)?
+
+    init() {
+        super.init(
+            contentRect: .zero,
+            styleMask: [.nonactivatingPanel, .borderless],
+            backing: .buffered,
+            defer: false
+        )
+        level = .floating
+        isOpaque = false
+        backgroundColor = .clear
+        hasShadow = false
+        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        hidesOnDeactivate = false
+        isReleasedWhenClosed = false
+        ignoresMouseEvents = false
+        contentView = ClickCatcherView { [weak self] in self?.onClick?() }
+    }
+
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
+}
+
+private final class ClickCatcherView: NSView {
+    private let onClick: () -> Void
+
+    init(onClick: @escaping () -> Void) {
+        self.onClick = onClick
+        super.init(frame: .zero)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("ClickCatcherView does not support NSCoding")
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        onClick()
     }
 }

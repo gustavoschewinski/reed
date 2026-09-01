@@ -6,19 +6,55 @@ import Testing
 
 // MARK: - Fakes
 
+/// One event any of the fakes below can log into a shared `EventLog` (Item
+/// 4) — the ordering between, say, a cue and a mute is invisible to any one
+/// fake's own counters, since each only knows about itself.
+private enum RecordedEvent: Equatable {
+    case cue(DictationCue)
+    case mute
+    case restore
+    case pause
+    case resume
+}
+
+/// Shared by `FakeCuePlayer`, `FakeVolumeControl`, and `FakeMediaControl`
+/// so a test can assert their combined, relative order — not just each
+/// one's own count. `NSLock`-protected: `FakeMediaControl` isn't
+/// `@MainActor`, so a record could in principle arrive from off the main
+/// actor even though, in practice, `DictationSession` only ever calls these
+/// fakes from itself (`@MainActor`).
+private final class EventLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _events: [RecordedEvent] = []
+    var events: [RecordedEvent] {
+        lock.lock()
+        defer { lock.unlock() }
+        return _events
+    }
+    func record(_ event: RecordedEvent) {
+        lock.lock()
+        _events.append(event)
+        lock.unlock()
+    }
+}
+
 private final class FakeMediaControl: MediaControl, @unchecked Sendable {
     var pauses = 0
     var resumes = 0
-    func pause() { pauses += 1 }
-    func resume() { resumes += 1 }
+    private let log: EventLog?
+    init(log: EventLog? = nil) { self.log = log }
+    func pause() { pauses += 1; log?.record(.pause) }
+    func resume() { resumes += 1; log?.record(.resume) }
 }
 
 @MainActor
 private final class FakeVolumeControl: VolumeControl {
     var mutes = 0
     var restores = 0
-    func mute() { mutes += 1 }
-    func restore() { restores += 1 }
+    private let log: EventLog?
+    init(log: EventLog? = nil) { self.log = log }
+    func mute() { mutes += 1; log?.record(.mute) }
+    func restore() { restores += 1; log?.record(.restore) }
 }
 
 @MainActor
@@ -54,7 +90,9 @@ private final class FakeClipboard: ClipboardStore, @unchecked Sendable {
 @MainActor
 private final class FakeCuePlayer {
     var played: [DictationCue] = []
-    func play(_ cue: DictationCue) { played.append(cue) }
+    private let log: EventLog?
+    init(log: EventLog? = nil) { self.log = log }
+    func play(_ cue: DictationCue) { played.append(cue); log?.record(.cue(cue)) }
 }
 
 /// Returns scripted passes in order — the pattern from
@@ -171,6 +209,8 @@ private actor OrderingTranscriber: Transcriber {
     }
 }
 
+// MARK: - Ephemeral UserDefaults
+
 // MARK: - Helper
 
 @MainActor
@@ -186,10 +226,11 @@ private func makeSession(
     canPaste: Bool = true,
     paste: (() -> Void)? = nil,
     passInterval: Duration = .milliseconds(5),
-    cuePlayer: FakeCuePlayer? = nil
+    cuePlayer: FakeCuePlayer? = nil,
+    microphonePermissionDenied: Bool? = nil
 ) throws -> DictationSession {
     let store = try store ?? TranscriptStore(inMemory: true)
-    let settings = settings ?? Settings(defaults: UserDefaults(suiteName: UUID().uuidString)!)
+    let settings = settings ?? Settings(defaults: FakeUserDefaults())
     let backing = transcriber ?? ScriptedTranscriber(passes: passes)
     let streaming = StreamingTranscriber(transcriber: backing)
     let cuePlayer = cuePlayer ?? FakeCuePlayer()
@@ -205,7 +246,8 @@ private func makeSession(
         canPaste: canPaste,
         paste: paste ?? {},
         passInterval: passInterval,
-        playCue: cuePlayer.play
+        playCue: cuePlayer.play,
+        microphonePermissionDenied: microphonePermissionDenied
     )
 }
 
@@ -248,7 +290,7 @@ private func makeSession(
 
 @MainActor
 @Test func settingsGateMutingAndMediaPause() async throws {
-    let defaults = UserDefaults(suiteName: UUID().uuidString)!
+    let defaults = FakeUserDefaults()
     let settings = Settings(defaults: defaults)
     settings.muteWhileRecording = false
     settings.pauseMediaWhileRecording = false
@@ -738,7 +780,7 @@ final class StateBox {
 
 @MainActor
 @Test func playSoundsFalseFiresNoCues() async throws {
-    let defaults = UserDefaults(suiteName: UUID().uuidString)!
+    let defaults = FakeUserDefaults()
     let settings = Settings(defaults: defaults)
     settings.playSounds = false
     let player = FakeCuePlayer()
@@ -803,4 +845,175 @@ final class StateBox {
     await task?.value
 
     #expect(player.played == [.start, .cancel])
+}
+
+// MARK: - cue/mute/pause ordering (Item 4)
+
+/// The start cue must be audible under `muteWhileRecording`'s default of
+/// on, which means it has to play before the mute takes effect — not after
+/// capture has already begun, the order an earlier version of `begin()`
+/// used. Fails against that earlier order, which would record
+/// `[.mute, .pause, .cue(.start)]`.
+@MainActor
+@Test func startCuePlaysBeforeMutingAndPausingSoItIsAudible() async throws {
+    let log = EventLog()
+    let media = FakeMediaControl(log: log)
+    let volume = FakeVolumeControl(log: log)
+    let cuePlayer = FakeCuePlayer(log: log)
+    let session = try makeSession(media: media, volume: volume, cuePlayer: cuePlayer)
+
+    session.begin()
+
+    #expect(log.events == [.cue(.start), .mute, .pause])
+}
+
+/// Same reasoning as the start cue, for `cancel()`'s cue: it must play
+/// before volume is restored and media resumed, not slip after teardown by
+/// accident.
+@MainActor
+@Test func cancelCuePlaysBeforeVolumeIsRestoredAndMediaResumed() async throws {
+    let log = EventLog()
+    let media = FakeMediaControl(log: log)
+    let volume = FakeVolumeControl(log: log)
+    let cuePlayer = FakeCuePlayer(log: log)
+    let session = try makeSession(media: media, volume: volume, cuePlayer: cuePlayer)
+
+    session.begin()
+    session.cancel()
+
+    #expect(log.events == [
+        .cue(.start), .mute, .pause,
+        .cue(.cancel), .resume, .restore,
+    ])
+}
+
+// MARK: - problem (Item 2)
+
+@MainActor
+@Test func problemIsNilBeforeAnyDictation() async throws {
+    let session = try makeSession()
+    #expect(session.problem == nil)
+}
+
+@MainActor
+@Test func deniedMicrophoneSetsAnExplanatoryProblemAndNeverEntersRecording() async throws {
+    struct StartFailed: Error {}
+    let recorder = FakeRecorder()
+    recorder.startError = StartFailed()
+    let session = try makeSession(recorder: recorder, microphonePermissionDenied: true)
+
+    session.begin()
+
+    #expect(session.state == .idle)
+    #expect(session.problem != nil)
+    #expect(session.problem?.contains("microphone") == true || session.problem?.contains("Microphone") == true)
+}
+
+@MainActor
+@Test func recorderFailureForAReasonOtherThanPermissionStillSetsAProblem() async throws {
+    struct StartFailed: Error {}
+    let recorder = FakeRecorder()
+    recorder.startError = StartFailed()
+    let session = try makeSession(recorder: recorder, microphonePermissionDenied: false)
+
+    session.begin()
+
+    #expect(session.state == .idle)
+    #expect(session.problem != nil)
+    // Distinct wording from the denied case: this message must not claim
+    // the user needs to flip a permission switch when the real cause is
+    // unknown (no mic attached, another app holding it exclusively, etc).
+    #expect(session.problem?.contains("microphone access") != true)
+}
+
+@MainActor
+@Test func aModelThatFailsToLoadSetsAProblem() async throws {
+    let session = try makeSession(transcriber: ThrowingTranscriber())
+
+    session.begin()
+    await session.end()?.value
+
+    #expect(session.state == .idle)
+    #expect(session.problem != nil)
+}
+
+@MainActor
+@Test func anEmptyTranscriptionSetsAProblem() async throws {
+    let session = try makeSession(passes: [pass("   ")])
+
+    session.begin()
+    await session.end()?.value
+
+    #expect(session.state == .idle)
+    #expect(session.problem != nil)
+}
+
+@MainActor
+@Test func missingAccessibilitySetsAProblemEvenThoughDeliverySucceeds() async throws {
+    let clipboard = FakeClipboard()
+    let session = try makeSession(passes: [pass("copied not typed")], clipboard: clipboard, canPaste: false)
+
+    session.begin()
+    await session.end()?.value
+
+    #expect(session.state == .idle)
+    #expect(session.problem != nil)
+    // Delivery itself still succeeded — the text landed on the clipboard —
+    // `problem` explains *how* it succeeded, it doesn't mean it failed.
+    #expect(clipboard.string == "copied not typed")
+}
+
+@MainActor
+@Test func aFullySuccessfulDictationNeverSetsAProblem() async throws {
+    let session = try makeSession(passes: [pass("all good")], canPaste: true)
+
+    session.begin()
+    await session.end()?.value
+
+    #expect(session.state == .idle)
+    #expect(session.problem == nil)
+}
+
+@MainActor
+@Test func cancellingIsNotAProblem() async throws {
+    let session = try makeSession()
+
+    session.begin()
+    session.cancel()
+
+    #expect(session.problem == nil)
+}
+
+@MainActor
+@Test func problemClearsOnTheNextBegin() async throws {
+    let recorder = FakeRecorder()
+    recorder.startError = NSError(domain: "test", code: 1)
+    let session = try makeSession(recorder: recorder, microphonePermissionDenied: true)
+
+    session.begin()
+    #expect(session.problem != nil)
+
+    recorder.startError = nil
+    session.begin()
+
+    #expect(session.problem == nil)
+}
+
+// MARK: - the overlay's final frame matches what was delivered (Item 11)
+
+/// On the batch-fallback path (streaming never confirmed enough to be
+/// trusted — the normal case for a short dictation), `finish()`'s
+/// authoritative text can differ from whatever the live preview last
+/// happened to show. The pill's last visible frame must reflect what was
+/// actually delivered, not a stale hypothesis.
+@MainActor
+@Test func previewTextMatchesTheFinalDeliveredTextOnTheBatchFallbackPath() async throws {
+    let session = try makeSession(passes: [pass("the real final transcript")])
+
+    session.begin()
+    await session.end()?.value
+
+    #expect(session.previewText == "the real final transcript")
+    #expect(session.confirmedText == "the real final transcript")
+    #expect(session.hypothesisText.isEmpty)
 }
