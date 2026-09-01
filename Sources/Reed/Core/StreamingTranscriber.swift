@@ -170,7 +170,13 @@ actor StreamingTranscriber {
         let seekTime = engine.hypothesisStartTime > 0
             ? engine.hypothesisStartTime
             : engine.confirmedEndTime
-        let seekSample = max(0, Int(seekTime * reedSampleRate))
+        // Subtracting the guard band here and in `trimConfirmedAudio` from
+        // the exact same source value (never one from `hypothesisStartTime`
+        // and the other from something else) is what keeps the two in sync
+        // — otherwise a pass would seek to read from one point while the
+        // buffer had already been trimmed to a different one, and word
+        // timings would stop matching the audio.
+        let seekSample = max(0, Int(seekTime * reedSampleRate) - leadingGuardBandSamples)
 
         guard seekSample > total else {
             return max(0, seekSample - trimmedSamples)
@@ -183,9 +189,19 @@ actor StreamingTranscriber {
         return 0
     }
 
+    /// Samples equivalent to `AgreementConfig.leadingGuardBandSeconds` — see
+    /// its doc comment. Computed from `config` rather than stored, so a
+    /// custom `config` (as tests pass) is always honored.
+    private var leadingGuardBandSamples: Int {
+        Int(config.leadingGuardBandSeconds * reedSampleRate)
+    }
+
     private func trimConfirmedAudio() {
         let totalAudio = trimmedSamples + buffer.count
-        let cut = max(0, Int(engine.hypothesisStartTime * reedSampleRate))
+        // See `seekRelative`'s comment: the guard band must be subtracted
+        // from the same `hypothesisStartTime` value it seeks from, or the
+        // two desync.
+        let cut = max(0, Int(engine.hypothesisStartTime * reedSampleRate) - leadingGuardBandSamples)
 
         // See seekRelative's comment: a hallucinated word inside the trailing
         // silence pad can report a time beyond real audio. Trimming to it

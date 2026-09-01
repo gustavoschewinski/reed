@@ -88,8 +88,34 @@ private let script = "one two. three four. five six. seven eight"
     // "one two." confirms on the 4th process() call, but that pass's own slice
     // was already dispatched at offset 0 before its process() ran. The 5th
     // pass (index 4) is the first one built after the confirmation, so it's
-    // the first to seek to "three"'s start time, 2.0s.
-    #expect(offsets[4] == 2.0)
+    // the first to seek to "three"'s reported start time, 2.0s — minus the
+    // leading guard band (Item 13), which pulls the actual seek point back
+    // to 1.9s so a slightly-early acoustic onset is never trimmed away.
+    #expect(offsets[4] == 2.0 - AgreementConfig().leadingGuardBandSeconds)
+}
+
+/// The guard band (Item 13) must hold at the exact boundary the agreement
+/// engine reports, not just "somewhere before it" — proves the trim/seek
+/// point is `leadingGuardBandSeconds` earlier than the first unconfirmed
+/// word's reported `startTime`, never right at it. Fails against a
+/// `leadingGuardBandSeconds` of 0 (the pre-fix behavior), which is exactly
+/// what made this a real bug: a word's true acoustic onset can precede its
+/// reported timestamp, and cutting at the timestamp exactly deletes that
+/// sliver of audio permanently.
+@Test func trimAndSeekNeverLandCloserThanTheGuardBandToTheFirstUnconfirmedWord() async throws {
+    let fake = ScriptedTranscriber(passes: Array(repeating: pass(script), count: 5))
+    let streamer = StreamingTranscriber(transcriber: fake)
+
+    await streamer.begin()
+    await streamer.append([Float](repeating: 0.1, count: 160_000))
+    for _ in 0..<5 { _ = await streamer.runPassIfDue() }
+
+    let offsets = await fake.offsets
+    let firstUnconfirmedWordStart = 2.0  // "three", per `script`/`pass(_:)`
+    let guardBand = AgreementConfig().leadingGuardBandSeconds
+    #expect(guardBand > 0)  // sanity: a band of 0 would make this test meaningless
+    #expect(offsets[4] == firstUnconfirmedWordStart - guardBand)
+    #expect(offsets[4] < firstUnconfirmedWordStart)
 }
 
 @Test func finishFallsBackToBatchWhenTooLittleWasConfirmed() async throws {

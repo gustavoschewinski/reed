@@ -50,6 +50,18 @@ struct AgreementConfig: Sendable {
     var boundaryWordCount: Int = 3
     var trailingSilenceSeconds: Double = 1.0
     var minConfirmedSegmentsToTrustStreaming: Int = 3
+    /// TDT's reported word `startTime` is an estimate carrying emission
+    /// delay, not the true acoustic onset — the model can report a word as
+    /// starting up to (roughly) this long after the sound of it actually
+    /// began. Trimming or seeking to the reported start exactly risks
+    /// permanently discarding that leading sliver of real audio, which the
+    /// next pass then transcribes as a clipped word — and because
+    /// confirmation is permanent, the clip compounds on every confirmation
+    /// for the rest of the recording. Subtracted from every cut/seek point
+    /// derived from a word's `startTime`, mirroring (at the opposite edge)
+    /// the 1.0s `trailingSilenceSeconds` pad already protects against the
+    /// same class of timing error.
+    var leadingGuardBandSeconds: Double = 0.1
     /// Beyond this much unconfirmed audio, preview passes are skipped rather than
     /// run at a cost that exceeds the tick interval. The final transcription is
     /// unaffected: finish() falls back to a batch pass over the whole recording.
