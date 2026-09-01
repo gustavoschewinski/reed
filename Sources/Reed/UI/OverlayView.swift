@@ -33,10 +33,6 @@ struct OverlayView: View {
     /// ignoring window).
     var onStopControlFrame: (CGRect) -> Void = { _ in }
 
-    /// `DictationSession` deliberately publishes no timing information —
-    /// only `state`, `previewText`, `level` — so the elapsed-time readout
-    /// is a local stopwatch, started and cleared off `state` transitions.
-    @State private var now: Date = .now
     /// Whether the settle-in animation has completed. Named for what it
     /// tracks, not for what it gates: unlike the opacity/scale pair this
     /// used to drive directly, `appeared == false` no longer means
@@ -150,9 +146,6 @@ struct OverlayView: View {
         }
         .onAppear {
             withAnimation(reduceMotion ? nil : Theme.appearSpring) { appeared = true }
-        }
-        .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { date in
-            now = date
         }
     }
 
@@ -269,10 +262,17 @@ struct OverlayView: View {
 
             Waveform(session: session)
 
-            Text(elapsedString)
-                .font(Theme.monoFont)
-                .monospacedDigit()
-                .foregroundColor(Theme.textDim)
+            // TimelineView, not `Timer.publish` + `onReceive`: the level
+            // meter re-renders this view ~10×/s, and `onReceive` would
+            // resubscribe to a freshly created timer each render — which
+            // therefore never survives long enough to fire, freezing the
+            // clock at 0:00.
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                Text(elapsedString(at: context.date))
+                    .font(Theme.monoFont)
+                    .monospacedDigit()
+                    .foregroundColor(Theme.textDim)
+            }
 
             Image(systemName: "mic.fill")
                 .font(.system(size: 10))
@@ -283,7 +283,7 @@ struct OverlayView: View {
         .padding(.vertical, Theme.paddingVertical)
     }
 
-    private var elapsedString: String {
+    private func elapsedString(at now: Date) -> String {
         guard let recordingStartedAt = session.recordingStartedAt else { return "0:00" }
         let elapsed = max(0, Int(now.timeIntervalSince(recordingStartedAt)))
         return String(format: "%d:%02d", elapsed / 60, elapsed % 60)
