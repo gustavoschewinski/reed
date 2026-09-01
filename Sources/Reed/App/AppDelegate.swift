@@ -1,5 +1,7 @@
 import AppKit
+import AVFoundation
 import Combine
+import KeyboardShortcuts
 import SwiftUI
 
 @MainActor
@@ -12,6 +14,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `TranscriptStore` instances `DictationSession` writes to, not copies.
     private let settings: Settings
     private let store: TranscriptStore
+
+    /// Held separately from `session` (which only sees it through
+    /// `StreamingTranscriber`) so onboarding's model-download screen can
+    /// call `prepare(progressHandler:)` on the very same actor instance —
+    /// warming it once here means the first real dictation never re-pays
+    /// that cost. `ParakeetTranscriber.prepare()` memoizes on its own, so
+    /// there is no risk of a second, duplicate load either way.
+    private let transcriber: ParakeetTranscriber
 
     /// The integration point for every piece in `Core`/`System`/`Data` — see
     /// its own doc comment. It never touches AppKit; this delegate is what
@@ -27,14 +37,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var mainWindow: NSWindow?
     private let mainWindowState = MainWindowState()
 
+    /// First-run onboarding (Task 14). Created lazily, reused while
+    /// showing, and cleared once it finishes — `nil` means either "never
+    /// shown this launch" or "already completed", both of which are
+    /// indistinguishable to anything that only wants to bring it forward.
+    private var onboardingWindow: NSWindow?
+
     override init() {
         let settings = Settings()
         let store = AppDelegate.makeStore()
+        let transcriber = ParakeetTranscriber()
         self.settings = settings
         self.store = store
+        self.transcriber = transcriber
         self.session = DictationSession(
             recorder: Recorder(),
-            transcriber: StreamingTranscriber(transcriber: ParakeetTranscriber()),
+            transcriber: StreamingTranscriber(transcriber: transcriber),
             volumeControl: SystemAudio(),
             mediaControl: MediaKeyControl(),
             store: store,
@@ -70,6 +88,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         hotkeyMonitor.onGesture = { [weak self] gesture in
             guard let self else { return }
+            // Recording must be impossible until onboarding — and with it,
+            // the model — is ready (see the brief). This is the one path
+            // that could reach `session` before that: a shortcut left over
+            // from a previous run's `UserDefaults`, fired before this run's
+            // onboarding has completed. Rather than let it silently do
+            // nothing, bring the onboarding window forward — visible state
+            // beats a shortcut that appears to do nothing at all.
+            guard settings.hasCompletedOnboarding else {
+                showOnboardingWindow()
+                return
+            }
             switch gesture {
             case .tap: session.toggle()
             case .holdStart: session.begin()
@@ -77,6 +106,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         hotkeyMonitor.activate()
+
+        if !settings.hasCompletedOnboarding {
+            showOnboardingWindow()
+        }
     }
 
     private func handle(state: DictationState) {
@@ -186,6 +219,76 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             window.makeKeyAndOrderFront(nil)
             mainWindow = window
         }
+
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    // MARK: - Onboarding
+
+    /// Shows the first-run window (Task 14), or just brings it forward if
+    /// it's already open. Every system call `OnboardingModel` needs is
+    /// wired up here — this is the one place that actually touches
+    /// AVFoundation's microphone API, `TextDelivery`'s Accessibility calls,
+    /// and `transcriber.prepare(progressHandler:)`, so the model itself
+    /// stays free of all three and testable without them.
+    private func showOnboardingWindow() {
+        if let onboardingWindow {
+            onboardingWindow.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        let model = OnboardingModel(
+            requestMicrophoneAccess: {
+                _ = await AVCaptureDevice.requestAccess(for: .audio)
+            },
+            currentMicrophoneStatus: {
+                switch AVCaptureDevice.authorizationStatus(for: .audio) {
+                case .authorized: return .granted
+                case .denied, .restricted: return .denied
+                case .notDetermined: return .notDetermined
+                @unknown default: return .notDetermined
+                }
+            },
+            currentAccessibilityGranted: { TextDelivery.accessibilityGranted },
+            requestAccessibility: { TextDelivery.requestAccessibility() },
+            prepareModel: { [transcriber] progressHandler in
+                try await transcriber.prepare(progressHandler: progressHandler)
+            },
+            suggestHotkeyDefault: {
+                // Per KeyboardShortcuts' own guidance: don't bake a default
+                // into the `Name` declaration (that would steal the
+                // shortcut for every user, always) — only pre-fill one here,
+                // on the screen that lets the user immediately change it,
+                // and only if nothing is set yet.
+                guard KeyboardShortcuts.getShortcut(for: .dictate) == nil else { return }
+                KeyboardShortcuts.setShortcut(
+                    KeyboardShortcuts.Shortcut(.space, modifiers: [.control, .option]),
+                    for: .dictate
+                )
+            },
+            finish: { [weak self] in
+                self?.settings.hasCompletedOnboarding = true
+                self?.onboardingWindow?.close()
+                self?.onboardingWindow = nil
+            }
+        )
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 420),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Welcome to Reed"
+        window.isReleasedWhenClosed = false
+        window.center()
+        // Deliberately not set, same as the main window: leaving
+        // `window.appearance` nil is what makes it follow the system
+        // light/dark appearance instead of staying fixed like the overlay.
+        window.contentView = NSHostingView(rootView: OnboardingView(model: model))
+        window.makeKeyAndOrderFront(nil)
+        onboardingWindow = window
 
         NSApp.activate(ignoringOtherApps: true)
     }

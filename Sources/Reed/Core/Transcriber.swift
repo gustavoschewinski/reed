@@ -61,6 +61,42 @@ struct TranscriptionPass: Sendable {
     static let empty = TranscriptionPass(text: "", words: [], confidence: 0)
 }
 
+/// Mirrors FluidAudio's `DownloadProgress`/`DownloadPhase` — same reasoning
+/// as `TokenSpan` above: `OnboardingModel` (Task 14) and its tests report and
+/// assert on this instead of the library's own type, so they never need to
+/// import FluidAudio or link CoreML.
+///
+/// `fractionCompleted` is real, monotonic progress across the whole prepare
+/// operation — download and Neural Engine compile combined — straight from
+/// FluidAudio; nothing here is synthesized or interpolated.
+struct ModelDownloadProgress: Sendable, Equatable {
+    enum Phase: Sendable, Equatable {
+        case listing
+        case downloading(completedFiles: Int, totalFiles: Int)
+        case compiling
+    }
+
+    let fractionCompleted: Double
+    let phase: Phase
+
+    init(fractionCompleted: Double, phase: Phase) {
+        self.fractionCompleted = fractionCompleted
+        self.phase = phase
+    }
+
+    init(_ progress: DownloadProgress) {
+        fractionCompleted = progress.fractionCompleted
+        switch progress.phase {
+        case .listing:
+            phase = .listing
+        case .downloading(let completedFiles, let totalFiles):
+            phase = .downloading(completedFiles: completedFiles, totalFiles: totalFiles)
+        case .compiling:
+            phase = .compiling
+        }
+    }
+}
+
 protocol Transcriber: Sendable {
     /// Downloads and loads the model. Safe to call more than once.
     func prepare() async throws
@@ -87,6 +123,20 @@ actor ParakeetTranscriber: Transcriber {
     /// load fails, `loadTask` is cleared so the next call retries from
     /// scratch instead of being stuck re-awaiting an already-failed task.
     func prepare() async throws {
+        try await prepare(progressHandler: nil)
+    }
+
+    /// Same as `prepare()`, but reports progress for onboarding's model
+    /// screen (`OnboardingModel`, Task 14). `progressHandler` is FluidAudio's
+    /// own — called on an unspecified queue, not this actor and not the main
+    /// actor — so a caller that touches UI state must hop back itself;
+    /// `OnboardingModel` does exactly that.
+    ///
+    /// If a load is already in flight when this is called (a concurrent
+    /// `prepare()` from an actual transcription, say), this caller just
+    /// awaits that same task and gets none of its own progress callbacks —
+    /// the download isn't happening twice, so there's nothing new to report.
+    func prepare(progressHandler: (@Sendable (ModelDownloadProgress) -> Void)?) async throws {
         guard manager == nil else { return }
 
         if let loadTask {
@@ -98,7 +148,9 @@ actor ParakeetTranscriber: Transcriber {
         // inherits the actor's isolation, so mutating `self.manager` /
         // `self.decoderLayers` inside it is actor-isolated, not a race.
         let task = Task<Void, Error> {
-            let models = try await AsrModels.downloadAndLoad(version: .v3)
+            let models = try await AsrModels.downloadAndLoad(version: .v3) { progress in
+                progressHandler?(ModelDownloadProgress(progress))
+            }
             let manager = AsrManager(config: .default)
             try await manager.loadModels(models)
             self.decoderLayers = await manager.decoderLayerCount
