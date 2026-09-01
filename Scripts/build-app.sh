@@ -39,5 +39,11 @@ done
 # binary — their licences must ship with it, not just live in the repo.
 cp "$ROOT/THIRD_PARTY_LICENSES.md" "$CONTENTS/Resources/THIRD_PARTY_LICENSES.md"
 
-codesign --force --deep --sign - "$APP"
+# A stable identity keeps permission grants across rebuilds; ad-hoc ("-")
+# changes every build and revokes them. Scripts/dev-cert.sh creates one.
+IDENTITY="-"
+if security find-identity -v -p codesigning 2>/dev/null | grep -q "Reed Dev Signing"; then
+    IDENTITY="Reed Dev Signing"
+fi
+codesign --force --deep --sign "$IDENTITY" "$APP"
 echo "Built $APP"

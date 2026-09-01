@@ -150,9 +150,12 @@ final class Recorder {
         // no device at all — the format is degenerate either way, which is
         // exactly what the validation below exists to catch regardless of
         // *why* it's degenerate.
-        engine.prepare()
-
+        // The input node must exist before `prepare()`: `AVAudioEngine`
+        // creates it lazily on first access, and preparing an engine with
+        // no nodes at all raises an NSException ("inputNode != nullptr ||
+        // outputNode != nullptr") that Swift cannot catch.
         let input = engine.inputNode
+        engine.prepare()
         let inputFormat = input.outputFormat(forBus: 0)
         DebugLog.log(
             "Recorder.start() input format sampleRate=\(inputFormat.sampleRate) channels=\(inputFormat.channelCount)"
@@ -166,7 +169,11 @@ final class Recorder {
         let targetFormat = self.targetFormat
         let buffer = self.buffer
 
-        input.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] pcmBuffer, _ in
+        // `@Sendable` keeps the closure out of MainActor isolation: a plain
+        // closure formed here inherits it, and the Swift 6 runtime then
+        // SIGTRAPs (`dispatch_assert_queue_fail`) when AVFAudio invokes the
+        // tap on its own realtime queue.
+        input.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { @Sendable [weak self] pcmBuffer, _ in
             let samples: [Float]
             do {
                 samples = try AudioMath.convert(buffer: pcmBuffer, to: targetFormat)
