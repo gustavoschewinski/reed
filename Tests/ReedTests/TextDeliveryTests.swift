@@ -1,13 +1,8 @@
-import Foundation
-// Scoped imports of just the two AppKit symbols we need — a plain `import
-// AppKit` transitively re-exports `ApplicationServices.Pasteboard`, an
-// unrelated system class that collides with our own `Pasteboard` protocol.
-import class AppKit.NSPasteboard
-import class AppKit.NSPasteboardItem
+import AppKit
 import Testing
 @testable import Reed
 
-private final class FakePasteboard: Pasteboard {
+private final class FakeClipboard: ClipboardStore {
     var items: [NSPasteboardItem]
 
     init(_ initial: String?) {
@@ -56,12 +51,12 @@ private final class FakePasteboard: Pasteboard {
 
 @MainActor
 @Test func deliveryPastesThenRestoresThePreviousClipboard() async {
-    let board = FakePasteboard("something the user had copied")
+    let board = FakeClipboard("something the user had copied")
     var pastedWhileSet: String?
 
     await TextDelivery.deliver(
         "hello world",
-        pasteboard: board,
+        clipboard: board,
         canPaste: true,
         paste: { pastedWhileSet = board.string },
         restoreAfter: .milliseconds(1)
@@ -73,12 +68,12 @@ private final class FakePasteboard: Pasteboard {
 
 @MainActor
 @Test func withoutAccessibilityTheTextStaysOnTheClipboard() async {
-    let board = FakePasteboard("old")
+    let board = FakeClipboard("old")
     var pasted = false
 
     await TextDelivery.deliver(
         "hello world",
-        pasteboard: board,
+        clipboard: board,
         canPaste: false,
         paste: { pasted = true },
         restoreAfter: .milliseconds(1)
@@ -90,12 +85,12 @@ private final class FakePasteboard: Pasteboard {
 
 @MainActor
 @Test func emptyTextIsNotDelivered() async {
-    let board = FakePasteboard("old")
+    let board = FakeClipboard("old")
     var pasted = false
 
     await TextDelivery.deliver(
         "   ",
-        pasteboard: board,
+        clipboard: board,
         canPaste: true,
         paste: { pasted = true },
         restoreAfter: .milliseconds(1)
@@ -111,11 +106,11 @@ private let testBinaryType = NSPasteboard.PasteboardType("com.reed.tests.binary"
 @Test func deliveryPreservesNonStringClipboardContents() async {
     let original = NSPasteboardItem()
     original.setData(Data([0xDE, 0xAD, 0xBE, 0xEF]), forType: testBinaryType)
-    let board = FakePasteboard(items: [original])
+    let board = FakeClipboard(items: [original])
 
     await TextDelivery.deliver(
         "hello world",
-        pasteboard: board,
+        clipboard: board,
         canPaste: true,
         paste: { },
         restoreAfter: .milliseconds(1)

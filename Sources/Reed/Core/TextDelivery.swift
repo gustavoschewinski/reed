@@ -1,14 +1,14 @@
 import AppKit
 import ApplicationServices
 
-protocol Pasteboard: AnyObject {
+protocol ClipboardStore: AnyObject {
     var string: String? { get set }
     /// Every item currently on the pasteboard, in every type it was offered in.
     func snapshot() -> [NSPasteboardItem]
     func restore(_ items: [NSPasteboardItem])
 }
 
-final class SystemPasteboard: Pasteboard {
+final class SystemClipboard: ClipboardStore {
     var string: String? {
         get { NSPasteboard.general.string(forType: .string) }
         set {
@@ -48,7 +48,7 @@ enum TextDelivery {
     /// text is left on the clipboard rather than lost.
     static func deliver(
         _ text: String,
-        pasteboard: any Pasteboard = SystemPasteboard(),
+        clipboard: any ClipboardStore = SystemClipboard(),
         canPaste: Bool? = nil,
         paste: (() -> Void)? = nil,
         restoreAfter: Duration = .milliseconds(150)
@@ -60,18 +60,18 @@ enum TextDelivery {
         guard !trimmed.isEmpty else { return }
 
         guard canPaste else {
-            pasteboard.string = trimmed
+            clipboard.string = trimmed
             return
         }
 
-        let previous = pasteboard.snapshot()
-        pasteboard.string = trimmed
+        let previous = clipboard.snapshot()
+        clipboard.string = trimmed
         paste()
 
         // The paste is asynchronous in the receiving app; restoring immediately
         // would race it.
         try? await Task.sleep(for: restoreAfter)
-        pasteboard.restore(previous)
+        clipboard.restore(previous)
     }
 
     static func pressCommandV() {
