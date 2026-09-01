@@ -1,0 +1,1019 @@
+import AppKit
+import CoreAudio
+import Foundation
+import Testing
+@testable import Reed
+
+// MARK: - Fakes
+
+/// One event any of the fakes below can log into a shared `EventLog` (Item
+/// 4) — the ordering between, say, a cue and a mute is invisible to any one
+/// fake's own counters, since each only knows about itself.
+private enum RecordedEvent: Equatable {
+    case cue(DictationCue)
+    case mute
+    case restore
+    case pause
+    case resume
+}
+
+/// Shared by `FakeCuePlayer`, `FakeVolumeControl`, and `FakeMediaControl`
+/// so a test can assert their combined, relative order — not just each
+/// one's own count. `NSLock`-protected: `FakeMediaControl` isn't
+/// `@MainActor`, so a record could in principle arrive from off the main
+/// actor even though, in practice, `DictationSession` only ever calls these
+/// fakes from itself (`@MainActor`).
+private final class EventLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _events: [RecordedEvent] = []
+    var events: [RecordedEvent] {
+        lock.lock()
+        defer { lock.unlock() }
+        return _events
+    }
+    func record(_ event: RecordedEvent) {
+        lock.lock()
+        _events.append(event)
+        lock.unlock()
+    }
+}
+
+private final class FakeMediaControl: MediaControl, @unchecked Sendable {
+    var pauses = 0
+    var resumes = 0
+    private let log: EventLog?
+    init(log: EventLog? = nil) { self.log = log }
+    func pause() { pauses += 1; log?.record(.pause) }
+    func resume() { resumes += 1; log?.record(.resume) }
+}
+
+@MainActor
+private final class FakeVolumeControl: VolumeControl {
+    var mutes = 0
+    var restores = 0
+    private let log: EventLog?
+    init(log: EventLog? = nil) { self.log = log }
+    func mute() { mutes += 1; log?.record(.mute) }
+    func restore() { restores += 1; log?.record(.restore) }
+}
+
+@MainActor
+private final class FakeRecorder: AudioRecording {
+    var onSamples: (([Float]) -> Void)?
+    var onLevel: ((Float) -> Void)?
+
+    var startCount = 0
+    var stopCount = 0
+    var startError: Error?
+    /// What `stop()` hands back — the "authoritative complete recording"
+    /// `DictationSession` reconciles its buffered samples against.
+    var samplesOnStop: [Float] = []
+
+    func start(deviceID: AudioDeviceID?) throws {
+        startCount += 1
+        if let startError { throw startError }
+    }
+
+    @discardableResult
+    func stop() -> [Float] {
+        stopCount += 1
+        return samplesOnStop
+    }
+}
+
+private final class FakeClipboard: ClipboardStore, @unchecked Sendable {
+    var string: String?
+    func snapshot() -> [NSPasteboardItem] { [] }
+    func restore(_ items: [NSPasteboardItem]) {}
+}
+
+@MainActor
+private final class FakeCuePlayer {
+    var played: [DictationCue] = []
+    private let log: EventLog?
+    init(log: EventLog? = nil) { self.log = log }
+    func play(_ cue: DictationCue) { played.append(cue); log?.record(.cue(cue)) }
+}
+
+/// Returns scripted passes in order — the pattern from
+/// `StreamingTranscriberTests.swift`. Content doesn't need to be realistic:
+/// `finish()`'s fallback path calls `transcribe` regardless of how much
+/// audio was actually appended, so these tests never need to feed real
+/// samples through `Recorder.onSamples` to get a deterministic result.
+private actor ScriptedTranscriber: Transcriber {
+    private var passes: [TranscriptionPass]
+    private(set) var callCount = 0
+
+    init(passes: [TranscriptionPass]) { self.passes = passes }
+
+    func prepare() async throws {}
+
+    func transcribe(_ samples: [Float], timeOffset: Double) async throws -> TranscriptionPass {
+        callCount += 1
+        return passes.isEmpty ? .empty : passes.removeFirst()
+    }
+}
+
+private func pass(_ text: String) -> TranscriptionPass {
+    TranscriptionPass(text: text, words: [], confidence: 1.0)
+}
+
+private struct BoomError: Error {}
+
+private actor ThrowingTranscriber: Transcriber {
+    func prepare() async throws {}
+    func transcribe(_ samples: [Float], timeOffset: Double) async throws -> TranscriptionPass {
+        throw BoomError()
+    }
+}
+
+/// Verifies no two `transcribe` calls ever overlap in time — the load-bearing
+/// property of the driving loop. Sleeps a fraction of the test's short
+/// `passInterval` so an implementation that fires on a bare repeating timer
+/// (rather than awaiting each pass before scheduling the next) would let two
+/// calls run concurrently and this would catch it.
+private actor OverlapDetectingTranscriber: Transcriber {
+    private(set) var callCount = 0
+    private(set) var maxConcurrent = 0
+    private var current = 0
+
+    func prepare() async throws {}
+
+    func transcribe(_ samples: [Float], timeOffset: Double) async throws -> TranscriptionPass {
+        callCount += 1
+        current += 1
+        maxConcurrent = max(maxConcurrent, current)
+        try? await Task.sleep(for: .milliseconds(15))
+        current -= 1
+        return TranscriptionPass(text: "hypothesis word", words: [], confidence: 1.0)
+    }
+}
+
+/// A delay that keeps a `transcribe` call genuinely in flight regardless of
+/// whether the *caller's* Task gets cancelled mid-wait. A bare `try? await
+/// Task.sleep(...)` is itself cancellation-aware and is invoked as part of
+/// the calling Task's chain — so once that Task is cancelled (as
+/// `cancel()` cancels the pass loop), the sleep throws almost immediately
+/// and `try?` swallows it, resolving this call far sooner than `duration`
+/// and collapsing the very race window these tests need to hold open. A
+/// freshly spawned `Task` has its own, independent cancellation state, so
+/// awaiting its `.value` genuinely waits out the full duration.
+private func uncancellableDelay(_ duration: Duration) async {
+    let sleeper = Task { try? await Task.sleep(for: duration) }
+    await sleeper.value
+}
+
+/// Delays before returning, so a caller can assert something about the
+/// world while this call is still in flight — even across a `cancel()` of
+/// whichever Task issued it.
+private actor DelayedTranscriber: Transcriber {
+    private let delay: Duration
+    private let text: String
+
+    init(delay: Duration, text: String = "stale preview text") {
+        self.delay = delay
+        self.text = text
+    }
+
+    func prepare() async throws {}
+
+    func transcribe(_ samples: [Float], timeOffset: Double) async throws -> TranscriptionPass {
+        await uncancellableDelay(delay)
+        return TranscriptionPass(text: text, words: [], confidence: 1.0)
+    }
+}
+
+/// Records the order in which calls *finish* (not the order they start),
+/// with the first call held open by `firstCallDelay` — immune to the
+/// issuing Task's cancellation, see `uncancellableDelay` — so a caller can
+/// arrange for a second call to be issued while it's still in flight, and
+/// confirm whether the second call was actually issued before the first
+/// completed.
+private actor OrderingTranscriber: Transcriber {
+    private(set) var completionOrder: [Int] = []
+    private var callIndex = 0
+    private let firstCallDelay: Duration
+
+    init(firstCallDelay: Duration) { self.firstCallDelay = firstCallDelay }
+
+    func prepare() async throws {}
+
+    func transcribe(_ samples: [Float], timeOffset: Double) async throws -> TranscriptionPass {
+        callIndex += 1
+        let myIndex = callIndex
+        if myIndex == 1 {
+            await uncancellableDelay(firstCallDelay)
+        }
+        completionOrder.append(myIndex)
+        return TranscriptionPass(text: "pass \(myIndex)", words: [], confidence: 1.0)
+    }
+}
+
+// MARK: - Ephemeral UserDefaults
+
+// MARK: - Helper
+
+@MainActor
+private func makeSession(
+    media: MediaControl = FakeMediaControl(),
+    volume: FakeVolumeControl = FakeVolumeControl(),
+    recorder: FakeRecorder = FakeRecorder(),
+    store: TranscriptStore? = nil,
+    settings: Settings? = nil,
+    passes: [TranscriptionPass] = [],
+    transcriber: (any Transcriber)? = nil,
+    clipboard: FakeClipboard = FakeClipboard(),
+    canPaste: Bool = true,
+    paste: (() -> Void)? = nil,
+    passInterval: Duration = .milliseconds(5),
+    cuePlayer: FakeCuePlayer? = nil,
+    microphonePermissionDenied: Bool? = nil
+) throws -> DictationSession {
+    let store = try store ?? TranscriptStore(inMemory: true)
+    let settings = settings ?? Settings(defaults: FakeUserDefaults())
+    let backing = transcriber ?? ScriptedTranscriber(passes: passes)
+    let streaming = StreamingTranscriber(transcriber: backing)
+    let cuePlayer = cuePlayer ?? FakeCuePlayer()
+
+    return DictationSession(
+        recorder: recorder,
+        transcriber: streaming,
+        volumeControl: volume,
+        mediaControl: media,
+        store: store,
+        settings: settings,
+        clipboard: clipboard,
+        canPaste: canPaste,
+        paste: paste ?? {},
+        passInterval: passInterval,
+        playCue: cuePlayer.play,
+        microphonePermissionDenied: microphonePermissionDenied
+    )
+}
+
+// MARK: - begin
+
+@MainActor
+@Test func beginMovesToRecordingAndPausesMedia() async throws {
+    let media = FakeMediaControl()
+    let session = try makeSession(media: media)
+
+    session.begin()
+
+    #expect(session.state == .recording)
+    #expect(media.pauses == 1)
+}
+
+@MainActor
+@Test func beginMutesOutputAndStartsTheRecorder() async throws {
+    let volume = FakeVolumeControl()
+    let recorder = FakeRecorder()
+    let session = try makeSession(volume: volume, recorder: recorder)
+
+    session.begin()
+
+    #expect(volume.mutes == 1)
+    #expect(recorder.startCount == 1)
+}
+
+@MainActor
+@Test func beginTwiceInARowIsIgnored() async throws {
+    let media = FakeMediaControl()
+    let session = try makeSession(media: media)
+
+    session.begin()
+    session.begin()
+
+    #expect(session.state == .recording)
+    #expect(media.pauses == 1)  // not paused twice
+}
+
+@MainActor
+@Test func settingsGateMutingAndMediaPause() async throws {
+    let defaults = FakeUserDefaults()
+    let settings = Settings(defaults: defaults)
+    settings.muteWhileRecording = false
+    settings.pauseMediaWhileRecording = false
+
+    let media = FakeMediaControl()
+    let volume = FakeVolumeControl()
+    let session = try makeSession(media: media, volume: volume, settings: settings)
+
+    session.begin()
+
+    #expect(media.pauses == 0)
+    #expect(volume.mutes == 0)
+
+    session.cancel()
+
+    // A user who turned these off must not have them touched on the way
+    // back out either.
+    #expect(media.resumes == 0)
+    #expect(volume.restores == 0)
+}
+
+// MARK: - cancel
+
+@MainActor
+@Test func cancelStoresNothingAndRestoresEverything() async throws {
+    let media = FakeMediaControl()
+    let store = try TranscriptStore(inMemory: true)
+    let session = try makeSession(media: media, store: store)
+
+    session.begin()
+    session.cancel()
+
+    #expect(session.state == .idle)
+    #expect(media.resumes == 1)
+    #expect(store.all().isEmpty)
+}
+
+@MainActor
+@Test func cancelDeliversNothingToTheClipboard() async throws {
+    let clipboard = FakeClipboard()
+    clipboard.string = "untouched"
+    let session = try makeSession(
+        passes: [pass("this must never be delivered")], clipboard: clipboard)
+
+    session.begin()
+    session.cancel()
+
+    #expect(clipboard.string == "untouched")
+}
+
+@MainActor
+@Test func cancelWhileIdleIsANoOp() async throws {
+    let media = FakeMediaControl()
+    let session = try makeSession(media: media)
+
+    session.cancel()
+
+    #expect(session.state == .idle)
+    #expect(media.resumes == 0)
+}
+
+// MARK: - end (the full path)
+
+@MainActor
+@Test func endWalksRecordingToTranscribingToIdleAndStoresOneTranscript() async throws {
+    let store = try TranscriptStore(inMemory: true)
+    let session = try makeSession(store: store, passes: [pass("hello world")])
+
+    session.begin()
+    #expect(session.state == .recording)
+
+    let task = session.end()
+    // Synchronous up to this point: end() has not yet had a chance to run
+    // its async continuation, since nothing has been awaited yet.
+    #expect(session.state == .transcribing)
+
+    await task?.value
+
+    #expect(session.state == .idle)
+    #expect(store.all().count == 1)
+    #expect(store.all().first?.text == "hello world")
+}
+
+/// `paste()` (injected via `canPaste: true`) runs synchronously inside
+/// `TextDelivery.deliver`, exactly while `completeEnd` has `state ==
+/// .delivering` — the one point at which that intermediate state is
+/// observable from outside. Proves the walk is recording → transcribing →
+/// delivering → idle, not a shortcut straight from transcribing to idle.
+@MainActor
+final class StateBox {
+    weak var session: DictationSession?
+}
+
+@MainActor
+@Test func endReachesDeliveringBeforeIdle() async throws {
+    let box = StateBox()
+    var observedStateAtPaste: DictationState?
+    let session = try makeSession(
+        passes: [pass("deliver me")],
+        paste: { observedStateAtPaste = box.session?.state }
+    )
+    box.session = session
+
+    session.begin()
+    await session.end()?.value
+
+    #expect(observedStateAtPaste == .delivering)
+    #expect(session.state == .idle)
+}
+
+@MainActor
+@Test func endResumesMediaAndRestoresVolume() async throws {
+    let media = FakeMediaControl()
+    let volume = FakeVolumeControl()
+    let session = try makeSession(media: media, volume: volume, passes: [pass("hi")])
+
+    session.begin()
+    await session.end()?.value
+
+    #expect(media.resumes == 1)
+    #expect(volume.restores == 1)
+}
+
+@MainActor
+@Test func endStopsTheRecorderExactlyOnce() async throws {
+    let recorder = FakeRecorder()
+    let session = try makeSession(recorder: recorder, passes: [pass("hi")])
+
+    session.begin()
+    await session.end()?.value
+
+    #expect(recorder.stopCount == 1)
+}
+
+/// The recorder's last chunk can be captured on the audio thread but not yet
+/// delivered through `onSamples` (an async dispatch) when the session calls
+/// `stop()`. `Recorder.stop()`'s return value is authoritative, so the
+/// session must reconcile against it rather than trust `onSamples` alone —
+/// otherwise the final transcript silently loses the recording's last words.
+@MainActor
+@Test func endRecoversSamplesNeverDeliveredThroughOnSamples() async throws {
+    let recorder = FakeRecorder()
+    // Nothing is ever pushed through recorder.onSamples — simulating every
+    // chunk still being in flight when stop() is called — but stop() itself
+    // reports 20,000 real samples were captured.
+    recorder.samplesOnStop = [Float](repeating: 0.1, count: 20_000)
+
+    let transcriber = ScriptedTranscriber(passes: [pass("recovered")])
+    let session = try makeSession(recorder: recorder, transcriber: transcriber)
+
+    session.begin()
+    await session.end()?.value
+
+    // The fallback pass must have been asked to transcribe real, non-empty
+    // audio — not an empty buffer, which is what a broken implementation
+    // that only trusted onSamples would send.
+    #expect(await transcriber.callCount == 1)
+}
+
+// MARK: - whitespace-only result
+
+@MainActor
+@Test func whitespaceOnlyResultStoresNothingAndDeliversNothing() async throws {
+    let store = try TranscriptStore(inMemory: true)
+    let clipboard = FakeClipboard()
+    clipboard.string = "untouched"
+    let session = try makeSession(store: store, passes: [pass("   ")], clipboard: clipboard)
+
+    session.begin()
+    await session.end()?.value
+
+    #expect(session.state == .idle)
+    #expect(store.all().isEmpty)
+    #expect(clipboard.string == "untouched")
+}
+
+// MARK: - throwing transcriber
+
+@MainActor
+@Test func throwingTranscriberStillReturnsToIdleWithEverythingRestored() async throws {
+    let media = FakeMediaControl()
+    let volume = FakeVolumeControl()
+    let recorder = FakeRecorder()
+    let store = try TranscriptStore(inMemory: true)
+    let session = try makeSession(
+        media: media, volume: volume, recorder: recorder, store: store,
+        transcriber: ThrowingTranscriber()
+    )
+
+    session.begin()
+    await session.end()?.value
+
+    #expect(session.state == .idle)
+    #expect(media.resumes == 1)
+    #expect(volume.restores == 1)
+    #expect(recorder.stopCount == 1)
+    #expect(store.all().isEmpty)
+}
+
+// MARK: - teardown runs exactly once
+
+@MainActor
+@Test func teardownRunsExactlyOnceOnCancel() async throws {
+    let media = FakeMediaControl()
+    let volume = FakeVolumeControl()
+    let session = try makeSession(media: media, volume: volume)
+
+    session.begin()
+    session.cancel()
+    session.cancel()  // already idle — must not double-resume
+
+    #expect(media.resumes == 1)
+    #expect(volume.restores == 1)
+}
+
+@MainActor
+@Test func teardownRunsExactlyOnceOnEnd() async throws {
+    let media = FakeMediaControl()
+    let volume = FakeVolumeControl()
+    let recorder = FakeRecorder()
+    let session = try makeSession(
+        media: media, volume: volume, recorder: recorder, passes: [pass("hi")])
+
+    session.begin()
+    await session.end()?.value
+
+    #expect(media.resumes == 1)
+    #expect(volume.restores == 1)
+    #expect(recorder.stopCount == 1)
+}
+
+@MainActor
+@Test func teardownRunsExactlyOnceEvenWhenTranscriberThrows() async throws {
+    let media = FakeMediaControl()
+    let volume = FakeVolumeControl()
+    let session = try makeSession(media: media, volume: volume, transcriber: ThrowingTranscriber())
+
+    session.begin()
+    await session.end()?.value
+
+    #expect(media.resumes == 1)
+    #expect(volume.restores == 1)
+}
+
+// MARK: - prepareForTermination (Item 1)
+
+@MainActor
+@Test func prepareForTerminationRestoresVolumeAndResumesMediaWhileRecording() async throws {
+    let media = FakeMediaControl()
+    let volume = FakeVolumeControl()
+    let session = try makeSession(media: media, volume: volume)
+
+    session.begin()
+    session.prepareForTermination()
+
+    #expect(media.resumes == 1)
+    #expect(volume.restores == 1)
+}
+
+@MainActor
+@Test func prepareForTerminationIsANoOpWhenIdle() async throws {
+    let media = FakeMediaControl()
+    let volume = FakeVolumeControl()
+    let session = try makeSession(media: media, volume: volume)
+
+    session.prepareForTermination()
+
+    #expect(media.resumes == 0)
+    #expect(volume.restores == 0)
+}
+
+@MainActor
+@Test func prepareForTerminationAfterANormalEndDoesNotDoubleRestore() async throws {
+    let media = FakeMediaControl()
+    let volume = FakeVolumeControl()
+    let session = try makeSession(media: media, volume: volume, passes: [pass("done")])
+
+    session.begin()
+    await session.end()?.value
+    session.prepareForTermination()
+
+    #expect(media.resumes == 1)
+    #expect(volume.restores == 1)
+}
+
+// MARK: - toggle
+
+@MainActor
+@Test func toggleFromIdleBegins() async throws {
+    let session = try makeSession()
+    session.toggle()
+    #expect(session.state == .recording)
+}
+
+@MainActor
+@Test func toggleFromRecordingEnds() async throws {
+    let session = try makeSession(passes: [pass("toggled off")])
+    session.toggle()
+    #expect(session.state == .recording)
+    session.toggle()
+    #expect(session.state == .transcribing)
+}
+
+@MainActor
+@Test func tapWhileTranscribingIsIgnored() async throws {
+    let store = try TranscriptStore(inMemory: true)
+    let session = try makeSession(store: store, passes: [pass("finish me")])
+
+    session.begin()
+    let task = session.end()
+    #expect(session.state == .transcribing)
+
+    // A tap landing mid-transcription must not begin a new recording, must
+    // not re-trigger end(), and must not crash.
+    session.toggle()
+    #expect(session.state == .transcribing)
+
+    await task?.value
+
+    #expect(session.state == .idle)
+    #expect(store.all().count == 1)
+}
+
+// MARK: - pass serialization
+
+/// Proves the core invariant of the driving loop: `runPassIfDue` (via
+/// `Transcriber.transcribe`) is never called again before the previous call
+/// has returned. A bare `Timer`-style implementation that fires every
+/// `passInterval` regardless of whether the prior pass finished would let
+/// `maxConcurrent` exceed 1 here, since each fake pass sleeps 15ms against a
+/// 5ms interval.
+@MainActor
+@Test func passesNeverOverlap() async throws {
+    let recorder = FakeRecorder()
+    let detector = OverlapDetectingTranscriber()
+    let session = try makeSession(recorder: recorder, transcriber: detector, passInterval: .milliseconds(5))
+
+    session.begin()
+    // Feed enough audio to clear StreamingTranscriber's minimum-sample floor
+    // so runPassIfDue actually calls transcribe on every iteration.
+    recorder.onSamples?([Float](repeating: 0.1, count: 20_000))
+
+    try await Task.sleep(for: .milliseconds(200))
+    session.cancel()
+
+    let calls = await detector.callCount
+    let maxConcurrent = await detector.maxConcurrent
+    #expect(calls > 1)  // the loop actually ran multiple passes in this window
+    #expect(maxConcurrent == 1)
+}
+
+@MainActor
+@Test func previewTextUpdatesWhileRecording() async throws {
+    let recorder = FakeRecorder()
+    let transcriber = ScriptedTranscriber(passes: [pass("live preview text")])
+    let session = try makeSession(recorder: recorder, transcriber: transcriber, passInterval: .milliseconds(5))
+
+    session.begin()
+    recorder.onSamples?([Float](repeating: 0.1, count: 20_000))
+
+    try await Task.sleep(for: .milliseconds(100))
+
+    // Checked before cancel() — which, correctly, clears previewText as
+    // part of its own cleanup.
+    #expect(session.previewText == "live preview text")
+
+    session.cancel()
+    #expect(session.previewText.isEmpty)
+}
+
+// MARK: - level resets on every exit (Finding 1)
+
+@MainActor
+@Test func levelResetsToZeroAfterCancel() async throws {
+    let recorder = FakeRecorder()
+    let session = try makeSession(recorder: recorder)
+
+    session.begin()
+    recorder.onLevel?(0.75)
+    #expect(session.level == 0.75)
+
+    session.cancel()
+    #expect(session.level == 0)
+}
+
+@MainActor
+@Test func levelResetsToZeroAfterEnd() async throws {
+    let recorder = FakeRecorder()
+    let session = try makeSession(recorder: recorder, passes: [pass("hi")])
+
+    session.begin()
+    recorder.onLevel?(0.5)
+    #expect(session.level == 0.5)
+
+    await session.end()?.value
+    #expect(session.level == 0)
+}
+
+// MARK: - a stale pass cannot repopulate previewText after cancel (Finding 2)
+
+/// Starts a pass that is still in flight when `cancel()` runs, then lets it
+/// actually complete, and confirms it never wrote its (now stale) result
+/// into `previewText`. Fails against a `runPassLoop` that checks
+/// `Task.isCancelled` only at the top of the loop (i.e. after the write),
+/// since the pass here is already inside `transcribe` — past that check —
+/// when `cancel()` runs.
+@MainActor
+@Test func cancelDoesNotLetAStalePassRepopulatePreviewText() async throws {
+    let recorder = FakeRecorder()
+    let transcriber = DelayedTranscriber(delay: .milliseconds(60))
+    let session = try makeSession(recorder: recorder, transcriber: transcriber, passInterval: .milliseconds(5))
+
+    session.begin()
+    recorder.onSamples?([Float](repeating: 0.1, count: 20_000))
+
+    // The loop's first pass should have started almost immediately and now
+    // be asleep inside the 60ms delay.
+    try await Task.sleep(for: .milliseconds(20))
+    session.cancel()
+    #expect(session.previewText.isEmpty)
+
+    // Let the in-flight pass actually finish.
+    try await Task.sleep(for: .milliseconds(100))
+    #expect(session.previewText.isEmpty)
+}
+
+// MARK: - cancel-then-begin cannot let a stale pass touch the fresh recording (Finding 3)
+
+/// `OrderingTranscriber`'s first call sleeps long enough to still be running
+/// when `cancel()` fires and a new `begin()` follows immediately. Without
+/// `begin()` awaiting the previous pass loop before calling
+/// `transcriber.begin()`, the second recording's loop would issue its own
+/// call while the first is still asleep — actor reentrancy lets the second,
+/// non-sleeping call finish first, recording completion order `[2, 1]`. With
+/// the fix, the second call can't even be issued until the first has fully
+/// finished, so the order must be `[1, 2]`.
+@MainActor
+@Test func cancelThenImmediateBeginDoesNotLetAStalePassRace() async throws {
+    let recorder = FakeRecorder()
+    let transcriber = OrderingTranscriber(firstCallDelay: .milliseconds(80))
+    let session = try makeSession(recorder: recorder, transcriber: transcriber, passInterval: .milliseconds(5))
+
+    session.begin()
+    recorder.onSamples?([Float](repeating: 0.1, count: 20_000))
+    // Give the loop a moment to actually issue its first call and enter the
+    // artificial delay, then cancel and immediately start a new recording.
+    try await Task.sleep(for: .milliseconds(15))
+    session.cancel()
+    session.begin()
+    recorder.onSamples?([Float](repeating: 0.1, count: 20_000))
+
+    // Long enough for both calls to have completed either way.
+    try await Task.sleep(for: .milliseconds(200))
+    session.cancel()
+
+    // Only the relative order of the first two calls is load-bearing here —
+    // recording 2's loop keeps running for the rest of the 200ms window and
+    // racks up further calls (3, 4, ...), which is expected and irrelevant.
+    let order = await transcriber.completionOrder
+    #expect(order.count >= 2)
+    #expect(Array(order.prefix(2)) == [1, 2])
+}
+
+// MARK: - Cues get a seam, gated by playSounds (Finding 4)
+
+@MainActor
+@Test func playSoundsTrueFiresTheCuesOnBeginCancelAndEnd() async throws {
+    let player = FakeCuePlayer()
+    let session = try makeSession(passes: [pass("hi")], cuePlayer: player)
+
+    session.begin()
+    #expect(player.played == [.start])
+
+    await session.end()?.value
+    #expect(player.played == [.start, .stop])
+}
+
+@MainActor
+@Test func playSoundsTrueFiresTheCancelCue() async throws {
+    let player = FakeCuePlayer()
+    let session = try makeSession(cuePlayer: player)
+
+    session.begin()
+    session.cancel()
+    #expect(player.played == [.start, .cancel])
+}
+
+@MainActor
+@Test func playSoundsFalseFiresNoCues() async throws {
+    let defaults = FakeUserDefaults()
+    let settings = Settings(defaults: defaults)
+    settings.playSounds = false
+    let player = FakeCuePlayer()
+    let session = try makeSession(settings: settings, passes: [pass("hi")], cuePlayer: player)
+
+    session.begin()
+    await session.end()?.value
+    #expect(player.played.isEmpty)
+}
+
+// MARK: - a throwing recorder.start() still tears down cleanly (Finding 5)
+
+@MainActor
+@Test func throwingRecorderStartLeavesStateIdleAndUnwindsMuteAndMediaPause() async throws {
+    struct StartFailed: Error {}
+    let media = FakeMediaControl()
+    let volume = FakeVolumeControl()
+    let recorder = FakeRecorder()
+    recorder.startError = StartFailed()
+    let session = try makeSession(media: media, volume: volume, recorder: recorder)
+
+    session.begin()
+
+    #expect(session.state == .idle)
+    #expect(media.pauses == 1)
+    #expect(media.resumes == 1)
+    #expect(volume.mutes == 1)
+    #expect(volume.restores == 1)
+}
+
+// MARK: - cancel works during transcribing too (Ruling)
+
+@MainActor
+@Test func cancelDuringTranscribingDeliversNothingAndStoresNothing() async throws {
+    let store = try TranscriptStore(inMemory: true)
+    let clipboard = FakeClipboard()
+    clipboard.string = "untouched"
+    let transcriber = DelayedTranscriber(delay: .milliseconds(60), text: "should never land anywhere")
+    let session = try makeSession(store: store, transcriber: transcriber, clipboard: clipboard)
+
+    session.begin()
+    let task = session.end()
+    #expect(session.state == .transcribing)
+
+    session.cancel()  // escape, mid-transcription
+    await task?.value
+
+    #expect(session.state == .idle)
+    #expect(store.all().isEmpty)
+    #expect(clipboard.string == "untouched")
+}
+
+@MainActor
+@Test func cancelDuringTranscribingPlaysTheCancelCue() async throws {
+    let player = FakeCuePlayer()
+    let transcriber = DelayedTranscriber(delay: .milliseconds(60))
+    let session = try makeSession(transcriber: transcriber, cuePlayer: player)
+
+    session.begin()
+    let task = session.end()
+    session.cancel()
+    await task?.value
+
+    #expect(player.played == [.start, .cancel])
+}
+
+// MARK: - cue/mute/pause ordering (Item 4)
+
+/// The start cue must be audible under `muteWhileRecording`'s default of
+/// on, which means it has to play before the mute takes effect — not after
+/// capture has already begun, the order an earlier version of `begin()`
+/// used. Fails against that earlier order, which would record
+/// `[.mute, .pause, .cue(.start)]`.
+@MainActor
+@Test func startCuePlaysBeforeMutingAndPausingSoItIsAudible() async throws {
+    let log = EventLog()
+    let media = FakeMediaControl(log: log)
+    let volume = FakeVolumeControl(log: log)
+    let cuePlayer = FakeCuePlayer(log: log)
+    let session = try makeSession(media: media, volume: volume, cuePlayer: cuePlayer)
+
+    session.begin()
+
+    #expect(log.events == [.cue(.start), .mute, .pause])
+}
+
+/// Same reasoning as the start cue, for `cancel()`'s cue: it must play
+/// before volume is restored and media resumed, not slip after teardown by
+/// accident.
+@MainActor
+@Test func cancelCuePlaysBeforeVolumeIsRestoredAndMediaResumed() async throws {
+    let log = EventLog()
+    let media = FakeMediaControl(log: log)
+    let volume = FakeVolumeControl(log: log)
+    let cuePlayer = FakeCuePlayer(log: log)
+    let session = try makeSession(media: media, volume: volume, cuePlayer: cuePlayer)
+
+    session.begin()
+    session.cancel()
+
+    #expect(log.events == [
+        .cue(.start), .mute, .pause,
+        .cue(.cancel), .resume, .restore,
+    ])
+}
+
+// MARK: - problem (Item 2)
+
+@MainActor
+@Test func problemIsNilBeforeAnyDictation() async throws {
+    let session = try makeSession()
+    #expect(session.problem == nil)
+}
+
+@MainActor
+@Test func deniedMicrophoneSetsAnExplanatoryProblemAndNeverEntersRecording() async throws {
+    struct StartFailed: Error {}
+    let recorder = FakeRecorder()
+    recorder.startError = StartFailed()
+    let session = try makeSession(recorder: recorder, microphonePermissionDenied: true)
+
+    session.begin()
+
+    #expect(session.state == .idle)
+    #expect(session.problem != nil)
+    #expect(session.problem?.contains("microphone") == true || session.problem?.contains("Microphone") == true)
+}
+
+@MainActor
+@Test func recorderFailureForAReasonOtherThanPermissionStillSetsAProblem() async throws {
+    struct StartFailed: Error {}
+    let recorder = FakeRecorder()
+    recorder.startError = StartFailed()
+    let session = try makeSession(recorder: recorder, microphonePermissionDenied: false)
+
+    session.begin()
+
+    #expect(session.state == .idle)
+    #expect(session.problem != nil)
+    // Distinct wording from the denied case: this message must not claim
+    // the user needs to flip a permission switch when the real cause is
+    // unknown (no mic attached, another app holding it exclusively, etc).
+    #expect(session.problem?.contains("microphone access") != true)
+}
+
+@MainActor
+@Test func aModelThatFailsToLoadSetsAProblem() async throws {
+    let session = try makeSession(transcriber: ThrowingTranscriber())
+
+    session.begin()
+    await session.end()?.value
+
+    #expect(session.state == .idle)
+    #expect(session.problem != nil)
+}
+
+@MainActor
+@Test func anEmptyTranscriptionSetsAProblem() async throws {
+    let session = try makeSession(passes: [pass("   ")])
+
+    session.begin()
+    await session.end()?.value
+
+    #expect(session.state == .idle)
+    #expect(session.problem != nil)
+}
+
+@MainActor
+@Test func missingAccessibilitySetsAProblemEvenThoughDeliverySucceeds() async throws {
+    let clipboard = FakeClipboard()
+    let session = try makeSession(passes: [pass("copied not typed")], clipboard: clipboard, canPaste: false)
+
+    session.begin()
+    await session.end()?.value
+
+    #expect(session.state == .idle)
+    #expect(session.problem != nil)
+    // Delivery itself still succeeded — the text landed on the clipboard —
+    // `problem` explains *how* it succeeded, it doesn't mean it failed.
+    #expect(clipboard.string == "copied not typed")
+}
+
+@MainActor
+@Test func aFullySuccessfulDictationNeverSetsAProblem() async throws {
+    let session = try makeSession(passes: [pass("all good")], canPaste: true)
+
+    session.begin()
+    await session.end()?.value
+
+    #expect(session.state == .idle)
+    #expect(session.problem == nil)
+}
+
+@MainActor
+@Test func cancellingIsNotAProblem() async throws {
+    let session = try makeSession()
+
+    session.begin()
+    session.cancel()
+
+    #expect(session.problem == nil)
+}
+
+@MainActor
+@Test func problemClearsOnTheNextBegin() async throws {
+    let recorder = FakeRecorder()
+    recorder.startError = NSError(domain: "test", code: 1)
+    let session = try makeSession(recorder: recorder, microphonePermissionDenied: true)
+
+    session.begin()
+    #expect(session.problem != nil)
+
+    recorder.startError = nil
+    session.begin()
+
+    #expect(session.problem == nil)
+}
+
+// MARK: - the overlay's final frame matches what was delivered (Item 11)
+
+/// On the batch-fallback path (streaming never confirmed enough to be
+/// trusted — the normal case for a short dictation), `finish()`'s
+/// authoritative text can differ from whatever the live preview last
+/// happened to show. The pill's last visible frame must reflect what was
+/// actually delivered, not a stale hypothesis.
+@MainActor
+@Test func previewTextMatchesTheFinalDeliveredTextOnTheBatchFallbackPath() async throws {
+    let session = try makeSession(passes: [pass("the real final transcript")])
+
+    session.begin()
+    await session.end()?.value
+
+    #expect(session.previewText == "the real final transcript")
+    #expect(session.confirmedText == "the real final transcript")
+    #expect(session.hypothesisText.isEmpty)
+}
