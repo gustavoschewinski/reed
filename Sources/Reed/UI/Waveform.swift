@@ -61,9 +61,17 @@ struct Waveform: View {
     }
 
     /// Bars sit at rest colour until they approach the top of their range,
-    /// then warm toward `reed` — "at peak only", not across the whole scale.
+    /// then brighten toward `textPrimary` — "at peak only", not across the
+    /// whole scale.
+    ///
+    /// This used to warm toward a brass accent. The accent is gone: the
+    /// app is ink plus one red wordmark, and a gold that appeared nowhere
+    /// else would have been the single stranded colour in the product.
+    /// Intensity carries the same information hue did here — a loud bar is
+    /// a bright bar — and it survives being glanced at over arbitrary
+    /// content better than a hue does.
     private func color(for level: Float) -> Color {
-        let warmth = max(0, (Double(normalized(level)) - 0.55) / 0.45)
-        return Color.lerp(Theme.textDim, Theme.reed, warmth)
+        let intensity = max(0, (Double(normalized(level)) - 0.55) / 0.45)
+        return Color.lerp(Theme.textDim, Theme.textPrimary, intensity)
     }
 }
