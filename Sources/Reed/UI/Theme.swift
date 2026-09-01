@@ -54,6 +54,28 @@ enum Theme {
     /// 3. Hypothesis text settling into confirmed text.
     /// Respect `accessibilityReduceMotion`: none of these fire under it —
     /// state changes apply straight away instead.
+    // MARK: - Window (light/dark)
+
+    /// Tokens for the main window (Dashboard/History/Settings, Task 13+).
+    ///
+    /// The overlay above is fixed dark on purpose — it floats over whatever
+    /// the user was already doing, so it stays legible and consistent no
+    /// matter what's under it. The main window is a normal page the user
+    /// opens deliberately; a window that stayed dark while the rest of
+    /// macOS was in light mode would look broken. So these resolve
+    /// dynamically through `NSColor(name:dynamicProvider:)` instead of
+    /// picking one fixed value, while keeping the same colour *roles* as
+    /// the overlay above: an ink background, a raised surface, primary/dim
+    /// text, `live` for the record state, `reed` as the one accent.
+    enum Window {
+        static let ink = Color.dynamic(light: 0xF7F5F0, dark: 0x0E0E10)
+        static let inkRaised = Color.dynamic(light: 0xEAE6DB, dark: 0x1A1A1E)
+        static let textPrimary = Color.dynamic(light: 0x1C1C1E, dark: 0xF2F2F4)
+        static let textDim = Color.dynamic(light: 0x6B6B70, dark: 0x8A8A93)
+        static let live = Color.dynamic(light: 0xD70015, dark: 0xFF453A)
+        static let reed = Color.dynamic(light: 0x9C7A1B, dark: 0xC9A227)
+    }
+
     static let appearSpring = Animation.spring(response: 0.18, dampingFraction: 0.82)
     /// `OverlayPanel` grows the actual `NSPanel` frame as the pill's SwiftUI
     /// content grows — still animation 1 (appear-and-grow), but driven by a
@@ -92,6 +114,29 @@ extension Color {
             green: ca.greenComponent + (cb.greenComponent - ca.greenComponent) * t,
             blue: ca.blueComponent + (cb.blueComponent - ca.blueComponent) * t,
             opacity: 1
+        )
+    }
+
+    /// A color that resolves to a different fixed hex value depending on
+    /// whether it's being drawn in a light or dark effective appearance —
+    /// used by `Theme.Window`, never by the always-dark overlay tokens
+    /// above. Built on `NSColor(name:dynamicProvider:)` because SwiftUI has
+    /// no direct "two hex values, pick by appearance" API of its own.
+    static func dynamic(light: UInt32, dark: UInt32) -> Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
+            let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            return NSColor(hex: isDark ? dark : light)
+        })
+    }
+}
+
+extension NSColor {
+    convenience init(hex: UInt32) {
+        self.init(
+            srgbRed: CGFloat((hex >> 16) & 0xFF) / 255,
+            green: CGFloat((hex >> 8) & 0xFF) / 255,
+            blue: CGFloat(hex & 0xFF) / 255,
+            alpha: 1
         )
     }
 }
