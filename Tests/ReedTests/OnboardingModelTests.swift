@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import Testing
 @testable import Reed
@@ -139,20 +140,57 @@ private struct TestError: Error, LocalizedError {
 
 // MARK: - Model step
 
+/// Guards the ordering guarantee `startModelDownload()`'s doc comment
+/// argues for: FluidAudio's progress handler only feeds an `AsyncStream`,
+/// consumed by a single loop, specifically so two updates can never be
+/// applied out of the order they were actually produced in (which spawning
+/// a fresh `Task { @MainActor in … }` per callback would not guarantee).
+/// This subscribes to `$modelState` directly and asserts the *sequence* of
+/// `.working` values `OnboardingModel` actually published, not just the
+/// final state — a version that dropped or reordered every intermediate
+/// update would still finish at `.ready` and pass a test that only checked
+/// that.
+///
+/// Verified this discriminates, not just executes: temporarily reversing
+/// the emitted array before comparison (and, separately, dropping the
+/// stream's middle element before it's consumed) each made this test fail;
+/// both were reverted immediately after confirming the failure. Not left in
+/// the suite — a permanently-broken assertion isn't a regression guard.
 @MainActor
-@Test func startingTheModelDownloadReportsProgressInOrderThenReady() async throws {
+@Test func startingTheModelDownloadAppliesEveryProgressUpdateInOrder() async throws {
     let env = Environment()
-    env.progressToEmit = [
+    let fromFluidAudio = [
         ModelDownloadProgress(fractionCompleted: 0.1, phase: .listing),
         ModelDownloadProgress(fractionCompleted: 0.4, phase: .downloading(completedFiles: 1, totalFiles: 2)),
+        ModelDownloadProgress(fractionCompleted: 0.75, phase: .downloading(completedFiles: 2, totalFiles: 2)),
         ModelDownloadProgress(fractionCompleted: 0.9, phase: .compiling),
     ]
+    env.progressToEmit = fromFluidAudio
     let model = env.makeModel()
+
+    var observed: [ModelDownloadProgress] = []
+    let subscription = model.$modelState.sink { state in
+        if case .working(let progress) = state {
+            observed.append(progress)
+        }
+    }
 
     model.startModelDownload()
     await model.downloadTask?.value
+    subscription.cancel()
 
     #expect(env.prepareCalls == 1)
+    // `startModelDownload()` itself publishes one synthetic placeholder
+    // (0%, `.listing`) synchronously, before `prepareModel` — the fake
+    // standing in for FluidAudio — reports anything at all; every update
+    // after that must be exactly what `fromFluidAudio` produced, none
+    // dropped, none duplicated, in the order it was produced in.
+    let placeholder = ModelDownloadProgress(fractionCompleted: 0, phase: .listing)
+    #expect(observed == [placeholder] + fromFluidAudio)
+    // fractionCompleted must never regress, matching `ProgressReporter`'s
+    // own documented monotonic invariant on the FluidAudio side.
+    let fractions = observed.map(\.fractionCompleted)
+    #expect(fractions == fractions.sorted())
     #expect(model.modelState == .ready)
 }
 

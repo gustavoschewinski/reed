@@ -60,7 +60,7 @@ private struct PermissionsStepView: View {
                 Text("Two permissions")
                     .font(.system(size: 20, weight: .semibold))
                     .foregroundColor(Theme.Window.textPrimary)
-                Text("Reed needs both to work. Grant them here, or later in System Settings.")
+                Text("Reed needs both to work. Grant them here, or handle it later — Settings will show you what's still missing.")
                     .font(.system(size: 13))
                     .foregroundColor(Theme.Window.textDim)
             }
@@ -82,6 +82,16 @@ private struct PermissionsStepView: View {
                     }
                 )
 
+                // Accessibility has no three-state status the way the
+                // microphone does — `AXIsProcessTrustedWithOptions` only
+                // ever shows its consent alert once per app, then silently
+                // no-ops on every later call. So this button doesn't try to
+                // guess whether the prompt will fire again: it attempts the
+                // prompt AND opens System Settings' Accessibility pane
+                // directly, every tap, guaranteeing a working route out
+                // regardless of the alert's state. Without this, a user who
+                // dismisses the one-time alert without reading it has no
+                // way back in — see the Task 14 fix-round-1 report.
                 PermissionRow(
                     symbol: "keyboard",
                     title: "Accessibility",
@@ -308,6 +318,7 @@ private struct HotkeyStepView: View {
 
 enum SystemSettingsPane {
     case microphone
+    case accessibility
 }
 
 enum SystemSettings {
@@ -316,6 +327,8 @@ enum SystemSettings {
         switch pane {
         case .microphone:
             urlString = "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
+        case .accessibility:
+            urlString = "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
         }
         guard let url = URL(string: urlString) else { return }
         NSWorkspace.shared.open(url)

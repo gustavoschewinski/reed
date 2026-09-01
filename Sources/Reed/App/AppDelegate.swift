@@ -251,7 +251,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             },
             currentAccessibilityGranted: { TextDelivery.accessibilityGranted },
-            requestAccessibility: { TextDelivery.requestAccessibility() },
+            // macOS shows `AXIsProcessTrustedWithOptions`'s consent alert
+            // only once per app; every call after that is a silent no-op.
+            // Opening System Settings' Accessibility pane directly here too
+            // — every tap, unconditionally — is what guarantees a working
+            // route out regardless of whether the alert actually fires,
+            // matching the microphone row's always-working escape. See
+            // `OnboardingModel.openAccessibilitySettings()`'s doc comment.
+            requestAccessibility: {
+                TextDelivery.requestAccessibility()
+                SystemSettings.open(.accessibility)
+            },
             prepareModel: { [transcriber] progressHandler in
                 try await transcriber.prepare(progressHandler: progressHandler)
             },
@@ -289,6 +299,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.contentView = NSHostingView(rootView: OnboardingView(model: model))
         window.makeKeyAndOrderFront(nil)
         onboardingWindow = window
+
+        // `PermissionsStepView.onDisappear` stops the permission poll when
+        // SwiftUI swaps that step's content out, but closing the window
+        // from the titlebar orders it out rather than deallocating its
+        // content — whether `onDisappear` fires reliably in that case isn't
+        // something to rely on. This is the explicit backstop: whatever
+        // step the window was on, closing it always stops the poll, so a
+        // 750ms timer can never keep ticking for the rest of the app's
+        // life. `stopObservingPermissions()` is idempotent, so this is a
+        // no-op on the (usual) path where polling was already stopped.
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification, object: window, queue: .main
+        ) { [weak model] _ in
+            // `queue: .main` above already guarantees this runs on the main
+            // thread; `assumeIsolated` just tells the type system what's
+            // already true, the same pattern `Recorder` uses for its own
+            // main-queue callback.
+            MainActor.assumeIsolated {
+                model?.stopObservingPermissions()
+            }
+        }
 
         NSApp.activate(ignoringOtherApps: true)
     }

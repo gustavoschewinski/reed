@@ -11,16 +11,31 @@ import SwiftUI
 /// Labels are written as things the user controls ("Mute other audio while
 /// recording"), in sentence case — not as switch names ("Enable output
 /// muting").
+///
+/// `accessibilityNotice` below is not a seventh control — it's a
+/// conditional problem indicator, shown only while Accessibility isn't
+/// granted, and it's the one route back for someone who dismissed
+/// onboarding's one-time consent alert without granting it (see
+/// `OnboardingModel.openAccessibilitySettings()`'s doc comment for why that
+/// alert can't just be re-shown). Preferences are things the user sets;
+/// this is Reed telling the user something is wrong, so it stays visually
+/// quieter than the six controls — no section header, no reed-tinted
+/// prominent button.
 @MainActor
 struct SettingsView: View {
     @ObservedObject var settings: Settings
 
     @State private var devices: [AudioInputDevice] = []
     @State private var launchAtLogin = LaunchAtLogin.isEnabled
+    @State private var accessibilityGranted = TextDelivery.accessibilityGranted
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 28) {
+                if !accessibilityGranted {
+                    accessibilityNotice
+                }
+
                 section("Hotkey") {
                     HStack {
                         Text("Dictation shortcut")
@@ -94,6 +109,43 @@ struct SettingsView: View {
     private func reload() {
         devices = AudioDevices.inputs()
         launchAtLogin = LaunchAtLogin.isEnabled
+        accessibilityGranted = TextDelivery.accessibilityGranted
+    }
+
+    /// Shown only while Accessibility isn't granted — see the type's own
+    /// doc comment. Deliberately muted: a small icon, `textDim` body copy,
+    /// and a plain `.bordered` button rather than the reed-tinted
+    /// `.borderedProminent` style the six real controls' actions use.
+    private var accessibilityNotice: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "exclamationmark.circle")
+                .font(.system(size: 13))
+                .foregroundColor(Theme.Window.textDim)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Reed can copy but can't paste")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(Theme.Window.textPrimary)
+                Text(
+                    "Without Accessibility, dictated text is left on the clipboard "
+                        + "instead of typed into the app you're using."
+                )
+                .font(.system(size: 11))
+                .foregroundColor(Theme.Window.textDim)
+
+                Button("Open System Settings") {
+                    SystemSettings.open(.accessibility)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .padding(.top, 2)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(12)
+        .background(Theme.Window.inkRaised.opacity(0.6))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
     /// The saved input device's ID, but only when it's *not* among the

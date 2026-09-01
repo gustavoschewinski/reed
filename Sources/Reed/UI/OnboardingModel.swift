@@ -115,9 +115,14 @@ final class OnboardingModel: ObservableObject {
         }
     }
 
-    /// Accessibility can't be granted in-app — this only opens the system
-    /// prompt (which itself deep-links to System Settings). Detecting that
-    /// the user actually flipped it happens separately, via polling.
+    /// Accessibility can't be granted in-app, and macOS shows its consent
+    /// alert only once per app — every call after that is a silent no-op.
+    /// So this doesn't just attempt the prompt: in production,
+    /// `requestAccessibility` (see `AppDelegate`) also opens System
+    /// Settings' Accessibility pane directly, every time, so there is
+    /// always a working route out regardless of whether the alert fires.
+    /// Detecting that the user actually flipped it happens separately, via
+    /// polling.
     func openAccessibilitySettings() {
         requestAccessibility()
     }
