@@ -134,7 +134,11 @@ final class DictationSession: ObservableObject {
     /// right before `stop()` may not have reached `pendingSamples` yet.
     private var appendedSampleCount = 0
 
-    private var recordingStartedAt: Date?
+    /// When the current (or last) recording began. `private(set)` so the
+    /// overlay's elapsed clock can read the authoritative start time
+    /// instead of trying to reconstruct it from state transitions it may
+    /// render too late to observe.
+    private(set) var recordingStartedAt: Date?
     /// Snapshot of the settings that were actually acted on at `begin()`, so
     /// `teardown()` reverses exactly what was done even if the user changes
     /// a setting mid-recording.
@@ -286,15 +290,21 @@ final class DictationSession: ObservableObject {
         // played into a live microphone risks being transcribed as speech,
         // and starting it first (rather than after capture opens) is what
         // keeps as much of it as possible outside the recording window.
+        // Media pause must come before the start cue: `MediaKeyControl`
+        // decides whether anything is playing by asking whether the output
+        // device is running, and the cue itself runs it — sampled after,
+        // Reed's own beep read as "music playing", the play/pause toggle
+        // fired against silence, and *started* the user's paused music.
+        didMute = settings.muteWhileRecording
+        didPauseMedia = settings.pauseMediaWhileRecording
+        if didPauseMedia { mediaControl.pause() }
+        DebugLog.log("DictationSession.begin() after media pause, didPauseMedia=\(didPauseMedia)")
+
         if settings.playSounds { playCue(.start) }
         DebugLog.log("DictationSession.begin() after cue, played=\(settings.playSounds)")
 
-        didMute = settings.muteWhileRecording
-        didPauseMedia = settings.pauseMediaWhileRecording
         if didMute { volumeControl.mute() }
         DebugLog.log("DictationSession.begin() after mute, didMute=\(didMute)")
-        if didPauseMedia { mediaControl.pause() }
-        DebugLog.log("DictationSession.begin() after media pause, didPauseMedia=\(didPauseMedia)")
 
         do {
             try recorder.start(deviceID: settings.inputDeviceID)

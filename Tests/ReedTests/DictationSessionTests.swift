@@ -863,10 +863,11 @@ final class StateBox {
 // MARK: - cue/mute/pause ordering (Item 4)
 
 /// The start cue must be audible under `muteWhileRecording`'s default of
-/// on, which means it has to play before the mute takes effect — not after
-/// capture has already begun, the order an earlier version of `begin()`
-/// used. Fails against that earlier order, which would record
-/// `[.mute, .pause, .cue(.start)]`.
+/// on, which means it has to play before the mute takes effect. Media
+/// pause comes first of all: `MediaKeyControl` decides whether anything is
+/// playing by asking if the output device is running, and the cue itself
+/// runs it — sampled after the cue, Reed's own beep would read as "music
+/// playing" and the play/pause toggle would *start* paused music.
 @MainActor
 @Test func startCuePlaysBeforeMutingAndPausingSoItIsAudible() async throws {
     let log = EventLog()
@@ -877,7 +878,7 @@ final class StateBox {
 
     session.begin()
 
-    #expect(log.events == [.cue(.start), .mute, .pause])
+    #expect(log.events == [.pause, .cue(.start), .mute])
 }
 
 /// Same reasoning as the start cue, for `cancel()`'s cue: it must play
@@ -895,7 +896,7 @@ final class StateBox {
     session.cancel()
 
     #expect(log.events == [
-        .cue(.start), .mute, .pause,
+        .pause, .cue(.start), .mute,
         .cue(.cancel), .resume, .restore,
     ])
 }

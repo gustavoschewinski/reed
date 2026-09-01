@@ -36,6 +36,10 @@ actor StreamingTranscriber {
     private(set) var confirmedSegments = 0
     /// So the tail-cap warning below logs once per recording, not once per tick.
     private var loggedTailCapped = false
+    /// Set when the tail cap ever forced a confirmation this recording —
+    /// `finish()` then always re-transcribes the whole recording instead of
+    /// trusting the streamed prefix.
+    private var forcedConfirmation = false
 
     /// Parakeet rejects very short inputs; below this a pass is skipped.
     private var minimumSamples: Int { Int(0.3 * reedSampleRate) }
@@ -55,6 +59,7 @@ actor StreamingTranscriber {
         trimmedSamples = 0
         confirmedSegments = 0
         loggedTailCapped = false
+        forcedConfirmation = false
         engine.reset()
     }
 
@@ -83,15 +88,29 @@ actor StreamingTranscriber {
         // turn a normal-cost pass into one that blows past the tick interval.
         let tailSamples = buffer.count - relative
         let maxTailSamples = Int(config.maxUnconfirmedTailSeconds * reedSampleRate)
-        guard tailSamples <= maxTailSamples else {
+        if tailSamples > maxTailSamples {
+            // Long uninterrupted speech can outgrow the re-transcription
+            // budget before agreement ever settles. Suspending the preview
+            // here (what this used to do) froze the pill mid-sentence for
+            // the rest of the recording; instead, promote the oldest
+            // hypothesis words to confirmed without waiting for agreement,
+            // trim their audio, and mark the streaming result untrusted so
+            // `finish()` re-transcribes the whole recording — the final
+            // transcript never inherits a word confirmed this way.
+            forcedConfirmation = true
+            let cutTime = Double(trimmedSamples + buffer.count) / reedSampleRate
+                - config.maxUnconfirmedTailSeconds / 2
+            engine.forceConfirm(before: cutTime)
+            trimConfirmedAudio()
             if !loggedTailCapped {
                 loggedTailCapped = true
                 NSLog(
-                    "Reed: unconfirmed tail exceeded %.0fs; suspending the live preview for "
-                        + "the rest of this recording. The final transcript is unaffected.",
+                    "Reed: unconfirmed tail exceeded %.0fs; force-confirming preview text and "
+                        + "using a full batch pass for the final transcript.",
                     config.maxUnconfirmedTailSeconds)
             }
-            return nil
+            return PreviewUpdate(
+                confirmedText: engine.confirmedText, hypothesisText: engine.hypothesisText)
         }
 
         let slice = Array(buffer[relative...])
@@ -129,7 +148,9 @@ actor StreamingTranscriber {
     /// Produces the authoritative text. Falls back to a clean batch pass when
     /// agreement never settled — the preview must never degrade the result.
     func finish() async throws -> String {
-        guard confirmedSegments >= config.minConfirmedSegmentsToTrustStreaming else {
+        guard confirmedSegments >= config.minConfirmedSegmentsToTrustStreaming,
+              !forcedConfirmation
+        else {
             // The real recording, not the trimmed buffer. Trimming has usually
             // already run once or twice by the time we land here, and padding
             // that region with silence would transcribe the opening of the

@@ -36,7 +36,6 @@ struct OverlayView: View {
     /// `DictationSession` deliberately publishes no timing information —
     /// only `state`, `previewText`, `level` — so the elapsed-time readout
     /// is a local stopwatch, started and cleared off `state` transitions.
-    @State private var recordingStartedAt: Date?
     @State private var now: Date = .now
     /// Whether the settle-in animation has completed. Named for what it
     /// tracks, not for what it gates: unlike the opacity/scale pair this
@@ -151,23 +150,6 @@ struct OverlayView: View {
         }
         .onAppear {
             withAnimation(reduceMotion ? nil : Theme.appearSpring) { appeared = true }
-            // The panel's content is installed in the same runloop tick as
-            // the .recording transition, so the first render already sees
-            // .recording and onChange below never fires — without this the
-            // clock sits at 0:00 for the whole dictation.
-            if session.state == .recording, recordingStartedAt == nil {
-                recordingStartedAt = .now
-            }
-        }
-        .onChange(of: session.state) { _, newState in
-            switch newState {
-            case .recording where recordingStartedAt == nil:
-                recordingStartedAt = .now
-            case .idle:
-                recordingStartedAt = nil
-            default:
-                break
-            }
         }
         .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { date in
             now = date
@@ -287,8 +269,6 @@ struct OverlayView: View {
 
             Waveform(session: session)
 
-            Spacer(minLength: 8)
-
             Text(elapsedString)
                 .font(Theme.monoFont)
                 .monospacedDigit()
@@ -304,7 +284,7 @@ struct OverlayView: View {
     }
 
     private var elapsedString: String {
-        guard let recordingStartedAt else { return "0:00" }
+        guard let recordingStartedAt = session.recordingStartedAt else { return "0:00" }
         let elapsed = max(0, Int(now.timeIntervalSince(recordingStartedAt)))
         return String(format: "%d:%02d", elapsed / 60, elapsed % 60)
     }

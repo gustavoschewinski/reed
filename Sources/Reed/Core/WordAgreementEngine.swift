@@ -96,6 +96,27 @@ final class WordAgreementEngine {
     private(set) var hypothesisStartTime: Double = 0
 
     var confirmedText: String { confirmedWords.map(\.text).joined(separator: " ") }
+    /// The current unconfirmed tail as text — what `result()` reports as
+    /// hypothesis, exposed for callers that need it between passes.
+    var hypothesisText: String { previousWords.map(\.text).joined(separator: " ") }
+
+    /// Promotes hypothesis words ending at or before `time` to confirmed
+    /// without waiting for agreement. Only for when the unconfirmed tail
+    /// has outgrown the re-transcription budget: the preview keeps moving,
+    /// and the caller must treat the streaming result as untrusted so the
+    /// final transcript never inherits a word confirmed this way.
+    func forceConfirm(before time: Double) {
+        let moved = Array(previousWords.prefix { $0.endTime <= time })
+        guard !moved.isEmpty else { return }
+        confirmedWords.append(contentsOf: moved)
+        previousWords.removeFirst(moved.count)
+        confirmedEndTime = moved.last!.endTime
+        hypothesisStartTime = previousWords.first?.startTime ?? confirmedEndTime
+        if previousWords.isEmpty {
+            consecutiveAgreements = 0
+            isFirstPass = true
+        }
+    }
 
     init(config: AgreementConfig = AgreementConfig()) {
         self.config = config

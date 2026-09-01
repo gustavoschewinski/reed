@@ -20,19 +20,26 @@ struct Waveform: View {
     /// collapse to nothing.
     private let minHeight: CGFloat = 3
 
-    @State private var levels: [Float] = Array(repeating: 0, count: 24)
+    /// A generous rolling history; the view renders only as many of the
+    /// most recent values as fit the width it's given.
+    @State private var levels: [Float] = Array(repeating: 0, count: 200)
 
     var body: some View {
-        HStack(alignment: .bottom, spacing: barSpacing) {
-            ForEach(Array(levels.enumerated()), id: \.offset) { _, level in
-                RoundedRectangle(cornerRadius: barWidth / 2)
-                    .fill(color(for: level))
-                    .frame(width: barWidth, height: height(for: level))
+        GeometryReader { proxy in
+            let count = max(1, Int((proxy.size.width + barSpacing) / (barWidth + barSpacing)))
+            let visible = Array(levels.suffix(count))
+            HStack(alignment: .bottom, spacing: barSpacing) {
+                ForEach(Array(visible.enumerated()), id: \.offset) { _, level in
+                    RoundedRectangle(cornerRadius: barWidth / 2)
+                        .fill(color(for: level))
+                        .frame(width: barWidth, height: height(for: level))
+                }
             }
+            .frame(width: proxy.size.width, height: proxy.size.height, alignment: .bottomLeading)
         }
-        .frame(height: maxHeight, alignment: .bottom)
+        .frame(maxWidth: .infinity)
+        .frame(height: maxHeight)
         .onReceive(session.$level) { newLevel in
-            guard !levels.isEmpty else { return }
             levels.removeFirst()
             levels.append(newLevel)
         }

@@ -315,25 +315,22 @@ private let script = "one two. three four. five six. seven eight"
     #expect(fifth.fullText == "one two. nine ten")
 }
 
-@Test func previewSuspendsWhenTheUnconfirmedTailGrowsTooLarge() async throws {
-    // Never actually consumed by runPassIfDue() below, since the cap must
-    // stop it from calling transcribe at all — available for finish()'s
-    // single fallback call instead.
+@Test func previewKeepsMovingWhenTheUnconfirmedTailGrowsTooLarge() async throws {
+    // Past the cap the streamer force-confirms the oldest hypothesis words
+    // (no transcribe call that tick), trims their audio, and keeps passing
+    // on the shortened tail — the preview never freezes mid-sentence.
     let fake = ScriptedTranscriber(passes: [pass("the complete batch transcript")])
     let streamer = StreamingTranscriber(transcriber: fake)
 
     await streamer.begin()
     await streamer.append([Float](repeating: 0.1, count: 17 * 16_000))  // 17s, past the 15s cap
-    #expect(await streamer.runPassIfDue() == nil)
+    _ = await streamer.runPassIfDue()
+    #expect(await fake.receivedLengths.isEmpty)  // the cap tick never transcribes
 
-    // A run-on speaker: more audio keeps arriving without ever confirming.
+    // The final transcript is unaffected: a forced confirmation marks the
+    // streamed prefix untrusted, so finish() falls back to a batch pass
+    // over the whole (complete, correct) recording.
     await streamer.append([Float](repeating: 0.1, count: 5 * 16_000))
-    #expect(await streamer.runPassIfDue() == nil)
-    #expect(await fake.receivedLengths.isEmpty)  // never once called transcribe
-
-    // The final transcript is unaffected: confirmedSegments never reached
-    // the trust threshold, so finish() falls back to a batch pass over the
-    // whole (complete, correct) recording.
     let result = try await streamer.finish()
     #expect(result == "the complete batch transcript")
     #expect(await fake.receivedLengths.last == 22 * 16_000 + 16_000)
