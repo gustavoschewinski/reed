@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import Testing
 @testable import Reed
@@ -54,6 +55,48 @@ import Testing
 
     store.delete(drop)
     #expect(store.all().map(\.id) == [keep.id])
+}
+
+@MainActor
+@Test func didChangeFiresOnlyAfterTheNewTranscriptIsActuallyVisible() throws {
+    let store = try TranscriptStore(inMemory: true)
+
+    // Asserting *inside* the subscription closure is the point: this is
+    // exactly what a real `.onReceive(store.didChange)` reload would see.
+    // Asserting after `add()` returns would pass even against the old
+    // notify-before-the-change bug (`objectWillChange`), since by then the
+    // mutation has long since happened — the bug only shows up mid-signal.
+    var visibleInsideTheHandler = false
+    var handlerRan = false
+    let cancellable = store.didChange.sink {
+        handlerRan = true
+        visibleInsideTheHandler = store.all().contains { $0.text == "hello" }
+    }
+
+    _ = store.add(text: "hello", duration: 1)
+
+    cancellable.cancel()
+    #expect(handlerRan)
+    #expect(visibleInsideTheHandler)
+}
+
+@MainActor
+@Test func didChangeFiresOnlyAfterADeletionIsActuallyVisible() throws {
+    let store = try TranscriptStore(inMemory: true)
+    let transcript = store.add(text: "gone soon", duration: 1)
+
+    var alreadyGoneInsideTheHandler = false
+    var handlerRan = false
+    let cancellable = store.didChange.sink {
+        handlerRan = true
+        alreadyGoneInsideTheHandler = !store.all().contains { $0.id == transcript.id }
+    }
+
+    store.delete(transcript)
+
+    cancellable.cancel()
+    #expect(handlerRan)
+    #expect(alreadyGoneInsideTheHandler)
 }
 
 @MainActor

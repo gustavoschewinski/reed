@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import SwiftData
 
@@ -5,6 +6,21 @@ import SwiftData
 final class TranscriptStore: ObservableObject {
     private let container: ModelContainer
     private var context: ModelContext { container.mainContext }
+
+    /// Fires once a mutation has actually landed — after `context.save()`
+    /// returns successfully, never before and never on a failed save.
+    ///
+    /// This is deliberately not `objectWillChange`: that fires (correctly,
+    /// per its own contract — see below) at the *top* of `add`/`delete`,
+    /// before the mutation happens, so a view whose `.onReceive` runs
+    /// synchronously inside that `send()` (Combine dispatches subscribers
+    /// synchronously, nested inside the call) would still see the *old*
+    /// state — a reload that runs before the transcript exists is exactly
+    /// as stale as no reload at all. `didChange` is the signal views should
+    /// actually observe to refresh; `objectWillChange` stays exactly as
+    /// SwiftUI's convention says it should (fired before the change, for
+    /// whatever else may come to rely on that contract) and is left alone.
+    let didChange = PassthroughSubject<Void, Never>()
 
     init(inMemory: Bool = false) throws {
         let config = ModelConfiguration(isStoredInMemoryOnly: inMemory)
@@ -28,6 +44,7 @@ final class TranscriptStore: ObservableObject {
         context.insert(transcript)
         do {
             try context.save()
+            didChange.send()
         } catch {
             NSLog("Reed: failed to save new transcript: \(error)")
         }
@@ -39,6 +56,7 @@ final class TranscriptStore: ObservableObject {
         context.delete(transcript)
         do {
             try context.save()
+            didChange.send()
         } catch {
             NSLog("Reed: failed to save transcript deletion: \(error)")
         }

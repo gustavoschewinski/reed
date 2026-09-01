@@ -61,12 +61,13 @@ struct HistoryView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
             reload()
         }
-        // `TranscriptStore` has no `@Published` properties of its own, so
-        // `add`/`delete` call `objectWillChange.send()` explicitly — this is
-        // what lets a completed dictation, or a pending deletion committing
-        // on its own timeout, update this list immediately instead of only
-        // on the next appear/focus.
-        .onReceive(store.objectWillChange) { reload() }
+        // `store.didChange` — not `objectWillChange` — fires after a
+        // mutation has actually landed (see its doc comment on
+        // `TranscriptStore`), so this is what lets a completed dictation,
+        // or a pending deletion committing on its own timeout, update this
+        // list immediately with correct data, instead of either reading
+        // stale state or waiting for the next appear/focus.
+        .onReceive(store.didChange) { reload() }
     }
 
     // MARK: - Data
