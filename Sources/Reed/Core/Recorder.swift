@@ -1,5 +1,6 @@
 import AVFoundation
 import CoreAudio
+import Foundation
 
 /// Sample rate Parakeet expects. Everything upstream converts to this.
 let reedSampleRate = 16_000.0
@@ -48,6 +49,34 @@ enum RecorderError: Error {
     case deviceUnavailable
 }
 
+/// Thread-safe accumulator for converted samples. The audio-render thread appends
+/// synchronously (no async hop, no race with `drain()`), while `Recorder` reads/resets
+/// it from the main actor. Marked `@unchecked Sendable` because the `NSLock` makes every
+/// access to `samples` mutually exclusive regardless of which thread calls in.
+private final class SampleBuffer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var samples: [Float] = []
+
+    func append(_ new: [Float]) {
+        lock.lock()
+        samples.append(contentsOf: new)
+        lock.unlock()
+    }
+
+    /// Returns everything accumulated so far. Does not clear — call `reset()` separately.
+    func drain() -> [Float] {
+        lock.lock()
+        defer { lock.unlock() }
+        return samples
+    }
+
+    func reset() {
+        lock.lock()
+        samples = []
+        lock.unlock()
+    }
+}
+
 /// Captures the microphone and publishes 16 kHz mono samples as they arrive.
 @MainActor
 final class Recorder {
@@ -57,18 +86,20 @@ final class Recorder {
     var onLevel: ((Float) -> Void)?
 
     private let engine = AVAudioEngine()
-    private var collected: [Float] = []
+    private let buffer = SampleBuffer()
     private let targetFormat = AVAudioFormat(
         commonFormat: .pcmFormatFloat32, sampleRate: reedSampleRate,
         channels: 1, interleaved: false
     )!
 
     func start(deviceID: AudioDeviceID? = nil) throws {
-        collected = []
+        buffer.reset()
 
         if let deviceID {
             var id = deviceID
-            let unit = engine.inputNode.audioUnit!
+            guard let unit = engine.inputNode.audioUnit else {
+                throw RecorderError.deviceUnavailable
+            }
             let status = AudioUnitSetProperty(
                 unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global,
                 0, &id, UInt32(MemoryLayout<AudioDeviceID>.size)
@@ -78,18 +109,38 @@ final class Recorder {
 
         let input = engine.inputNode
         let inputFormat = input.outputFormat(forBus: 0)
+        let targetFormat = self.targetFormat
+        let buffer = self.buffer
 
-        input.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, _ in
-            guard let self else { return }
-            guard let samples = try? AudioMath.convert(buffer: buffer, to: self.targetFormat),
-                  !samples.isEmpty
-            else { return }
+        input.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] pcmBuffer, _ in
+            let samples: [Float]
+            do {
+                samples = try AudioMath.convert(buffer: pcmBuffer, to: targetFormat)
+            } catch {
+                // No onError callback exists (deliberately, per interface scope); log so a
+                // dropped chunk during recording is at least visible instead of silent.
+                NSLog("Reed: audio conversion failed: %@", String(describing: error))
+                return
+            }
+            guard !samples.isEmpty else { return }
+
+            // Append synchronously, on the audio-render thread, before this tap callback
+            // returns. Once `stop()`'s `engine.stop()` call returns, the render thread
+            // cannot be mid-callback, so no further appends are possible and `drain()`
+            // is guaranteed to see every sample.
+            buffer.append(samples)
 
             let level = AudioMath.rms(samples)
-            Task { @MainActor in
-                self.collected.append(contentsOf: samples)
-                self.onSamples?(samples)
-                self.onLevel?(level)
+            // DispatchQueue.main.async is FIFO by contract, unlike separately-created
+            // Task { @MainActor in ... } instances, so callback delivery preserves the
+            // "in order" guarantee onSamples documents. MainActor.assumeIsolated is safe
+            // here because this closure only ever runs once actually scheduled on the
+            // main thread, which is what backs the MainActor by default.
+            DispatchQueue.main.async { [weak self] in
+                MainActor.assumeIsolated {
+                    self?.onSamples?(samples)
+                    self?.onLevel?(level)
+                }
             }
         }
 
@@ -102,6 +153,6 @@ final class Recorder {
     func stop() -> [Float] {
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
-        return collected
+        return buffer.drain()
     }
 }

@@ -15,6 +15,13 @@ import Testing
     #expect(AudioMath.rms([]) == 0)
 }
 
+@Test func rmsOfAlternatingFullAndZeroIsNotPeakOrMeanAbsolute() {
+    // For alternating 1.0/0.0, RMS ≈ 0.7071, mean-absolute = 0.5, peak = 1.0.
+    // A peak-detector or mean-absolute stand-in would fail this.
+    let samples = (0..<512).map { $0.isMultiple(of: 2) ? Float(1) : Float(0) }
+    #expect(abs(AudioMath.rms(samples) - 0.70710678) < 0.0001)
+}
+
 @Test func conversionResamplesTo16kHzMono() throws {
     let input = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2)!
     let buffer = AVAudioPCMBuffer(pcmFormat: input, frameCapacity: 48_000)!
