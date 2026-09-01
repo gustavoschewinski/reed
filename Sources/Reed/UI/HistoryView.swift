@@ -133,7 +133,7 @@ struct HistoryView: View {
         .background {
             RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous)
                 .strokeBorder(
-                    searchFocused ? Theme.Window.reed : Color.clear,
+                    searchFocused ? Theme.Window.textDim : Color.clear,
                     lineWidth: 1
                 )
         }
@@ -223,7 +223,8 @@ struct HistoryView: View {
             Button("Undo") { undoDelete() }
                 .buttonStyle(.plain)
                 .font(Theme.Typography.body)
-                .foregroundColor(Theme.Window.reed)
+                .foregroundColor(Theme.Window.textPrimary)
+                .fontWeight(.medium)
         }
         .padding(.horizontal, Theme.Space.lg)
         .padding(.vertical, Theme.Space.md)
@@ -276,7 +277,7 @@ private struct HistoryRow: View {
                     IconButton(
                         systemName: isCopied ? "checkmark" : "doc.on.doc",
                         help: "Copy",
-                        tint: isCopied ? Theme.Window.reed : Theme.Window.textDim,
+                        tint: isCopied ? Theme.Window.textPrimary : Theme.Window.textDim,
                         action: copy
                     )
                     IconButton(systemName: "trash", help: "Delete", action: delete)

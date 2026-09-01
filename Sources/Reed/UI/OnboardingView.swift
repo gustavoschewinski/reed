@@ -10,8 +10,12 @@ import SwiftUI
 ///
 /// A window, not a panel — it follows system light/dark appearance like the
 /// main window (`Theme.Window`), not the overlay's permanently-dark tokens.
-/// Three quiet screens, `Theme.Window.reed` as the one accent, no
-/// illustrations, no marketing copy.
+/// Three quiet screens, no accent colour, no illustrations, no marketing
+/// copy. Like the main window, this is ink and nothing else: the primary
+/// buttons are tinted with `textPrimary` rather than left on the system
+/// accent, so the first thing a new user sees is the same monochrome the
+/// rest of the app keeps — and so the app's one red object stays the
+/// wordmark.
 @MainActor
 struct OnboardingView: View {
     @ObservedObject var model: OnboardingModel
@@ -42,7 +46,7 @@ struct OnboardingView: View {
         HStack(spacing: 6) {
             ForEach(OnboardingStep.allCases, id: \.self) { step in
                 Circle()
-                    .fill(step == model.step ? Theme.Window.reed : Theme.Window.inkRaised)
+                    .fill(step == model.step ? Theme.Window.textPrimary : Theme.Window.inkRaised)
                     .frame(width: 6, height: 6)
             }
         }
@@ -108,7 +112,7 @@ private struct PermissionsStepView: View {
                 Spacer()
                 Button("Continue") { model.advanceToModelStep() }
                     .buttonStyle(.borderedProminent)
-                    .tint(Theme.Window.reed)
+                    .tint(Theme.Window.textPrimary)
             }
         }
         .onAppear { model.beginObservingPermissions() }
@@ -151,7 +155,7 @@ private struct PermissionRow: View {
             if granted {
                 Label("Allowed", systemImage: "checkmark.circle.fill")
                     .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(Theme.Window.reed)
+                    .foregroundColor(Theme.Window.textPrimary)
                     .labelStyle(.titleAndIcon)
             } else {
                 Button(actionTitle, action: action)
@@ -203,7 +207,7 @@ private struct ModelStepView: View {
         case .working(let progress):
             VStack(alignment: .leading, spacing: 10) {
                 ProgressView(value: progress.fractionCompleted)
-                    .tint(Theme.Window.reed)
+                    .tint(Theme.Window.textPrimary)
                 Text(caption(for: progress.phase))
                     .font(.system(size: 12))
                     .foregroundColor(Theme.Window.textDim)
@@ -212,7 +216,7 @@ private struct ModelStepView: View {
         case .ready:
             Label("Ready.", systemImage: "checkmark.circle.fill")
                 .font(.system(size: 13, weight: .medium))
-                .foregroundColor(Theme.Window.reed)
+                .foregroundColor(Theme.Window.textPrimary)
 
         case .failed(let message):
             VStack(alignment: .leading, spacing: 6) {
@@ -232,23 +236,23 @@ private struct ModelStepView: View {
         case .notStarted:
             Button("Download the model") { model.startModelDownload() }
                 .buttonStyle(.borderedProminent)
-                .tint(Theme.Window.reed)
+                .tint(Theme.Window.textPrimary)
 
         case .working:
             Button("Continue") {}
                 .buttonStyle(.borderedProminent)
-                .tint(Theme.Window.reed)
+                .tint(Theme.Window.textPrimary)
                 .disabled(true)
 
         case .ready:
             Button("Continue") { model.advanceToHotkeyStep() }
                 .buttonStyle(.borderedProminent)
-                .tint(Theme.Window.reed)
+                .tint(Theme.Window.textPrimary)
 
         case .failed:
             Button("Try again") { model.startModelDownload() }
                 .buttonStyle(.borderedProminent)
-                .tint(Theme.Window.reed)
+                .tint(Theme.Window.textPrimary)
         }
     }
 
@@ -308,7 +312,7 @@ private struct HotkeyStepView: View {
                 Spacer()
                 Button("Get started") { model.completeOnboarding() }
                     .buttonStyle(.borderedProminent)
-                    .tint(Theme.Window.reed)
+                    .tint(Theme.Window.textPrimary)
             }
         }
     }

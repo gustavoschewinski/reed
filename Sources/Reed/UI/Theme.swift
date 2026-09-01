@@ -6,8 +6,8 @@ import SwiftUI
 ///
 /// The overlay is an instrument readout, not a page — something glanced at
 /// dozens of times a day and trusted, not admired. The boldness budget here
-/// is deliberately tiny: one alarm colour, one accent, and exactly three
-/// animations (see the Motion section below).
+/// is deliberately tiny: one alarm colour, no accent at all, and exactly
+/// three animations (see the Motion section below).
 enum Theme {
     // MARK: - Colors
 
@@ -22,8 +22,6 @@ enum Theme {
     static let textDim = Color(hex: 0x8A8A93)
     /// The record indicator. The only alarm colour — used once, nowhere else.
     static let live = Color(hex: 0xFF453A)
-    /// Warm brass — waveform bars at peak only.
-    static let reed = Color(hex: 0xC9A227)
 
     // MARK: - Metrics
 
@@ -66,7 +64,8 @@ enum Theme {
     /// dynamically through `NSColor(name:dynamicProvider:)` instead of
     /// picking one fixed value, while keeping the same colour *roles* as
     /// the overlay above: an ink background, a raised surface, primary/dim
-    /// text, `live` for the record state, `reed` as the one accent.
+    /// text, and `live` for the record state. Unlike the overlay there is
+    /// no accent role here at all — see `mark` below.
     ///
     /// The main window is translucent: an `NSVisualEffectView` blurs the
     /// desktop behind it (see `VisualEffect`), and these tokens are painted
@@ -92,7 +91,22 @@ enum Theme {
         static let textPrimary = Color.dynamic(light: 0x1C1C1E, dark: 0xF2F2F4)
         static let textDim = Color.dynamic(light: 0x6B6B70, dark: 0x8A8A93)
         static let live = Color.dynamic(light: 0xD70015, dark: 0xFF453A)
-        static let reed = Color.dynamic(light: 0x9C7A1B, dark: 0xC9A227)
+
+        /// The wordmark, and nothing else in the entire window.
+        ///
+        /// This window has no accent colour. Every measure, figure,
+        /// selection and focus ring is ink at some opacity, which is what
+        /// lets a single red object in the top-left corner carry the
+        /// app's identity by itself — an accent spent in six places is
+        /// decoration, the same colour spent once is a mark.
+        ///
+        /// It holds the same values as `live` above. That is deliberate
+        /// and not a duplicate: `live` means *recording right now* and
+        /// `mark` means *this is Reed*, they answer to different reasons,
+        /// and either can move without dragging the other with it. One
+        /// token doing both jobs would make the wordmark change colour
+        /// the day the record indicator needs tuning.
+        static let mark = Color.dynamic(light: 0xD70015, dark: 0xFF453A)
 
         /// The wash over the vibrancy material — the main window's actual
         /// background. Dark mode carries slightly more of it: light

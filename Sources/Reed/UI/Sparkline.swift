@@ -13,7 +13,10 @@ import SwiftUI
 /// doesn't.
 struct Sparkline: View {
     let values: [Int]
-    var color: Color = Theme.reed
+    /// No default. The app has no accent colour to fall back on, and a
+    /// sparkline that silently picked one would be the only view choosing
+    /// its own ink.
+    let color: Color
 
     var body: some View {
         GeometryReader { proxy in

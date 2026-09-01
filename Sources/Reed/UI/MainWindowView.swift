@@ -37,11 +37,11 @@ final class MainWindowState: ObservableObject {
 /// light/dark appearance — see `Theme.Window`.
 ///
 /// The sidebar is hand-built rather than a `List` with `.listStyle(.sidebar)`.
-/// The system style paints the selected row with the user's accent colour,
-/// which would put a second accent on a window whose whole premise is one
-/// (`reed`, spent on the dashboard's saved figure). The rows below select
-/// with a 2pt brass marker and a shift from dim to primary text instead —
-/// quieter, and it stays the same colour on every Mac.
+/// The system style paints the selected row in whatever accent colour the
+/// user set in System Settings, which would drop an arbitrary, un-designed
+/// hue into a window that is otherwise entirely ink and one red wordmark.
+/// The rows below select with an ink marker and a shift from dim to
+/// primary text instead — quieter, and identical on every Mac.
 @MainActor
 struct MainWindowView: View {
     @ObservedObject var store: TranscriptStore
@@ -63,11 +63,20 @@ struct MainWindowView: View {
 
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("Reed")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundColor(Theme.Window.textPrimary)
-                .padding(.horizontal, Theme.Space.lg)
-                .padding(.bottom, Theme.Space.lg)
+            // The window's only colour. Mark and wordmark share it so the
+            // two read as one object rather than as a red glyph next to
+            // some text.
+            HStack(spacing: Theme.Space.sm) {
+                Image(systemName: "waveform")
+                    .font(.system(size: 13, weight: .medium))
+                Text("Reed")
+                    .font(.system(size: 13, weight: .semibold))
+            }
+            .foregroundColor(Theme.Window.mark)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Reed")
+            .padding(.horizontal, Theme.Space.lg)
+            .padding(.bottom, Theme.Space.lg)
 
             ForEach(MainTab.allCases, id: \.self) { tab in
                 SidebarItem(
@@ -134,9 +143,9 @@ private struct SidebarItem: View {
     var body: some View {
         Button(action: select) {
             HStack(spacing: Theme.Space.sm) {
-                // The selection marker. 2pt of brass, and the only place
-                // the accent appears in the sidebar.
-                Theme.Window.reed
+                // The selection marker: 2pt of full-strength ink against
+                // the dim text of every unselected row.
+                Theme.Window.textPrimary
                     .frame(width: 2, height: 16)
                     .opacity(isSelected ? 1 : 0)
 

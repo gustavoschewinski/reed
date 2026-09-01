@@ -5,14 +5,16 @@ import SwiftUI
 ///
 /// Reed's claim is a comparison, not a big asserted figure: you spoke for
 /// this long, and typing the same words would have taken that long. So the
-/// two measures below the hero are the point — a short brass rule over a
-/// long dim one, where the saving is a *length you can see* before it is a
+/// two measures below the hero are the point — a short ink rule over a
+/// long pale one, where the saving is a *length you can see* before it is a
 /// number you read. The hero figure names what that gap adds up to; the
 /// rules are what make it true rather than asserted.
 ///
 /// They are 4pt rules, not 16pt bars. At bar weight the two lengths read
-/// as a chart and invite comparison of their fill colours; at rule weight
-/// they read as measurements, which is what they are. The 40 words-per-
+/// as a chart and invite comparison of their fills; at rule weight they
+/// read as measurements, which is what they are. Both are ink — the
+/// difference between them is opacity and length, never hue, so the eye
+/// compares the one thing that carries meaning here. The 40 words-per-
 /// minute assumption behind "typed" is labelled plainly, not buried.
 ///
 /// Below that: quiet supporting figures (words, sessions, streak) and a
@@ -123,8 +125,9 @@ struct DashboardView: View {
         return CGFloat(totalSpokenSeconds / typedSeconds)
     }
 
-    /// The window's one loud element, and the only place `reed` is spent on
-    /// this tab besides the measure below it and the sparkline.
+    /// The largest type in the window, and the whole reason the tab
+    /// exists. It gets there on size alone — there is no accent colour to
+    /// spend on it.
     private var hero: some View {
         VStack(alignment: .leading, spacing: Theme.Space.xs) {
             Text("You saved")
@@ -132,7 +135,7 @@ struct DashboardView: View {
                 .foregroundColor(Theme.Window.textDim)
             Text(DurationFormat.short(savedSeconds))
                 .font(Theme.Typography.display)
-                .foregroundColor(Theme.Window.reed)
+                .foregroundColor(Theme.Window.textPrimary)
         }
     }
 
@@ -144,7 +147,7 @@ struct DashboardView: View {
                 title: "Spoke",
                 duration: totalSpokenSeconds,
                 fraction: spokenFraction,
-                tint: Theme.Window.reed
+                tint: Theme.Window.textPrimary
             )
             measure(
                 title: "Typing the same words",
@@ -226,7 +229,7 @@ struct DashboardView: View {
                     .font(Theme.Typography.dataSmall)
                     .foregroundColor(Theme.Window.textDim)
             }
-            Sparkline(values: dailyCounts, color: Theme.Window.reed)
+            Sparkline(values: dailyCounts, color: Theme.Window.textPrimary)
                 .frame(height: 44)
         }
     }

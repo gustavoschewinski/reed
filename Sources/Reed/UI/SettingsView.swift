@@ -29,8 +29,8 @@ import SwiftUI
 /// `OnboardingModel.openAccessibilitySettings()`'s doc comment for why that
 /// alert can't just be re-shown). Preferences are things the user sets;
 /// this is Reed telling the user something is wrong, so it stays visually
-/// quieter than the six controls — outlined rather than filled, and no
-/// reed-tinted prominent button.
+/// quieter than the six controls — outlined rather than filled, and a
+/// plain `.bordered` button rather than a prominent one.
 @MainActor
 struct SettingsView: View {
     @ObservedObject var settings: Settings
@@ -152,7 +152,7 @@ struct SettingsView: View {
                         Toggle("Launch Reed at login", isOn: $launchAtLogin)
                             .labelsHidden()
                             .toggleStyle(.switch)
-                            .tint(Theme.Window.reed)
+                            .tint(Theme.Window.textPrimary)
                             .onChange(of: launchAtLogin) { _, newValue in
                                 LaunchAtLogin.isEnabled = newValue
                             }
@@ -192,11 +192,16 @@ struct SettingsView: View {
     /// The label lives in the `Field` to the left, so the switch itself
     /// carries only an accessibility label — a visible `Toggle` title here
     /// would print the same words twice.
+    ///
+    /// Tinted with ink rather than left on the system default, which is
+    /// the user's chosen accent colour — an arbitrary blue, pink or green
+    /// switch would be the loudest thing on a window whose only colour is
+    /// the wordmark.
     private func toggle(_ isOn: Binding<Bool>, label: String) -> some View {
         Toggle(label, isOn: isOn)
             .labelsHidden()
             .toggleStyle(.switch)
-            .tint(Theme.Window.reed)
+            .tint(Theme.Window.textPrimary)
     }
 
     // MARK: - Notices
