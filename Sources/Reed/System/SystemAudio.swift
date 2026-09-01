@@ -37,27 +37,37 @@ final class SystemAudio {
             NSLog("Reed: could not read output volume; skipping mute")
             return
         }
+        // Write-ahead, deliberately in this order — persist before the
+        // volume is actually changed, not after. `synchronize()` is
+        // deprecated, but its old, blocking behavior is exactly what's
+        // wanted here: force the write to happen now rather than racing an
+        // async flush against a crash that could land first.
+        //
+        // If the process dies between this write and the `setVolume` call
+        // below, the worst case is a persisted record of a mute that never
+        // actually happened — `restoreLeftoverMuteIfNeeded()` at the next
+        // launch just writes `currentVolume` back onto `device`, a value
+        // that's already correct since nothing was ever changed. Harmless.
+        // The reverse order (mute first, persist second — what this used
+        // to be) left a window where a kill after the real mute but before
+        // the write stranded the user: volume at 0, with no record left
+        // anywhere to recover it. Do not swap these back for tidiness —
+        // the order is deliberate, even though muting first reads more
+        // naturally.
+        defaults.set(Int(device), forKey: PersistKeys.device)
+        defaults.set(currentVolume, forKey: PersistKeys.volume)
+        defaults.synchronize()
+
         guard Self.setVolume(0, on: device) else {
             NSLog("Reed: failed to mute output volume")
             return
         }
         muted = (device: device, volume: currentVolume)
-
-        // Item 1: written immediately, not batched — this has to be on
-        // disk before the process could die without warning, not just
-        // before it exits cleanly. `synchronize()` is deprecated, but its
-        // old, blocking behavior is exactly what's wanted here: force the
-        // write to happen now rather than racing an async flush against a
-        // crash that could land first.
-        defaults.set(Int(device), forKey: PersistKeys.device)
-        defaults.set(currentVolume, forKey: PersistKeys.volume)
-        defaults.synchronize()
     }
 
     func restore() {
         guard let muted else { return }
         self.muted = nil
-        Self.clearPersistedMute(defaults)
 
         guard Self.deviceExists(muted.device) else {
             // The default output changed after mute() (headphones plugged in
@@ -68,10 +78,27 @@ final class SystemAudio {
             NSLog("Reed: output device changed since mute; dropping the restore")
             return
         }
+
+        // Write-ahead, mirrored from `mute()` above: the persisted record
+        // is cleared only *after* the volume is actually written back, not
+        // before. If the process dies between the two steps below, the
+        // worst case is a stale record outliving a restore that already
+        // succeeded — the next launch's `restoreLeftoverMuteIfNeeded()`
+        // just writes the same, already-correct volume back again, a
+        // harmless no-op. The reverse order (clear first, restore
+        // second — what this used to be) left a window where a kill after
+        // the clear but before `setVolume` erased the only record of a
+        // mute that was still in effect, with nothing left to recover it.
+        // Do not swap these back for tidiness — the order is deliberate.
+        // (On the failure path below, the record is deliberately left in
+        // place too, rather than cleared: that gives the next launch
+        // another chance to actually fix the volume instead of silently
+        // giving up on it.)
         guard Self.setVolume(muted.volume, on: muted.device) else {
             NSLog("Reed: failed to restore output volume")
             return
         }
+        Self.clearPersistedMute(defaults)
     }
 
     /// Launch-time safety net (Item 1): if the previous run died — crash,
