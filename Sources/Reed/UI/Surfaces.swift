@@ -60,6 +60,51 @@ extension View {
     }
 }
 
+// MARK: - App icon
+
+/// Reed's own icon, at whatever size the call site needs.
+///
+/// Loads `Reed.icns` out of the bundle rather than a second copy of the
+/// artwork added to `Resources/`: the icon in the Dock and the icon in the
+/// window are the same file, so they cannot drift, and changing
+/// `Resources/icon-source.png` changes both.
+///
+/// Deliberately not `NSImage(named: .applicationIconName)`, which is the
+/// obvious way to ask for it. That goes through the system's icon services,
+/// and on macOS 26 those hand back the icon *as the system presents it* —
+/// which for an app shipping a plain `.icns` means mounted on Tahoe's light
+/// glass tile. In the Dock that tile is the platform's business; inside our
+/// own window it is a white box around a 16pt mark. Reading the file gives
+/// the artwork, and nothing else.
+///
+/// The fallback is the waveform symbol the wordmark used before there was
+/// an icon. It only appears outside a built `.app` — `swift run`, tests —
+/// where there is no bundle resource to read.
+struct AppIcon: View {
+    var size: CGFloat
+
+    private var icon: NSImage? {
+        guard let url = Bundle.main.url(forResource: "Reed", withExtension: "icns") else {
+            return nil
+        }
+        return NSImage(contentsOf: url)
+    }
+
+    var body: some View {
+        if let icon {
+            Image(nsImage: icon)
+                .resizable()
+                .interpolation(.high)
+                .frame(width: size, height: size)
+        } else {
+            Image(systemName: "waveform")
+                .font(.system(size: size * 0.8, weight: .medium))
+                .foregroundColor(Theme.Window.mark)
+                .frame(width: size, height: size)
+        }
+    }
+}
+
 // MARK: - Rule
 
 /// A hairline. The window's only grouping device.

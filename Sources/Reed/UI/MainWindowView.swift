@@ -63,16 +63,18 @@ struct MainWindowView: View {
 
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // The window's only colour. Mark and wordmark share it so the
-            // two read as one object rather than as a red glyph next to
-            // some text.
+            // The window's only colour, now carried by the app's own icon
+            // rather than by a symbol tinted with `mark`. The two reds are
+            // the same family but not the same value — the icon's is a lit
+            // gradient (around 8B0C12 in its body), `mark` is flat D70015 —
+            // so the wordmark keeps `mark` rather than trying to match a
+            // colour that changes across the icon's own surface.
             HStack(spacing: Theme.Space.sm) {
-                Image(systemName: "waveform")
-                    .font(.system(size: 13, weight: .medium))
+                AppIcon(size: 18)
                 Text("Reed")
                     .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(Theme.Window.mark)
             }
-            .foregroundColor(Theme.Window.mark)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("Reed")
             .padding(.horizontal, Theme.Space.lg)

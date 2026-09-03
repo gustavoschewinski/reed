@@ -1,86 +1,110 @@
 #!/usr/bin/env bash
-# Regenerates Resources/Reed.icns from the vector design below.
+# Regenerates Resources/Reed.icns from Resources/icon-source.png.
 #
-# The design is a cane reed — the blade that vibrates to give a clarinet or
-# saxophone its voice — in brass (#C9A227) on a dark rounded-square ground.
-# It has the features that make a reed read as a reed rather than a leaf,
-# a flame, or a dagger: a flat, square-cut base; an asymmetric taper (thick
-# at the base, shaved thin toward the tip); a blunt, flat-cut tip instead
-# of a needle point (a real reed ends in a shaved edge, not a spike — a
-# point is what makes a blade read as a weapon); and a central spine.
+# The design is the waveform — the same five bars the overlay draws while
+# you dictate — in white on Reed's red. It is the app's one colour used at
+# its largest: `Theme.Window.mark` is that red spent once in the window, and
+# this is the same idea at Dock size.
 #
-# The spine disappears below 128px: at 16-64px it anti-aliases into the
-# fill and just reads as mush, so those sizes render from a spine-free
-# variant of the same silhouette instead of carrying a dead detail.
+# The source is a raster, not the inline SVG this script used to carry. That
+# is a real loss — the previous design could be edited by changing a path in
+# this file — so the source lives in the repo as `Resources/icon-source.png`
+# rather than only in whatever tool drew it. Replacing the icon means
+# replacing that file and re-running this script.
 #
-# Both variants are inline SVG so the icon has no opaque binary source;
-# edit the paths here and re-run this script to change it.
+# ---------------------------------------------------------------------------
+# Why the art is rendered edge to edge
 #
-# Requires ImageMagick (`brew install imagemagick`) to rasterize the SVG,
-# and `iconutil` (part of Xcode command line tools) to assemble the .icns.
+# The obvious thing to do is what Apple's own grid says: seat the rounded
+# square in about 80% of the canvas and leave the rest as breathing room.
+# Doing that produced a white box around the icon on macOS 26.
+#
+# Reed is built against the macOS 26 SDK, which opts the app into Tahoe's
+# icon system: the system applies its own rounded-square shape and its own
+# shadow. Handing it art that only covers part of the canvas makes it treat
+# that art as a small legacy icon and mount it on the default light tile —
+# the icon shrinks, and the tile shows around it as white. (Verified against
+# Obsidian, which shows no tile: same icns-only packaging, but built against
+# the 15.1 SDK, so it is drawn as-is.)
+#
+# So the art fills the canvas. The source's own drop shadow is cropped away
+# with it — the system draws the shadow now, and keeping a second one baked
+# into the art would double it.
+#
+# The corners are still rounded here even though macOS 26 masks them anyway.
+# That mask is what older macOS does not do: the deployment floor is 14, and
+# there a fully square icns renders as a hard square in the Dock. Rounding
+# costs nothing on 26 (the system's mask lands on top of an identical curve)
+# and is the whole difference on 14 and 15.
+# ---------------------------------------------------------------------------
+#
+# Requires ImageMagick (`brew install imagemagick`) to rasterize and
+# `iconutil` (part of the Xcode command line tools) to assemble the .icns.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SRC="$ROOT/Resources/icon-source.png"
 OUT="$ROOT/Resources/Reed.icns"
+
+CANVAS=1024
+# 0.225 of the side — Apple's own corner radius for a macOS icon, which is
+# 185.4pt on the 824pt square their template draws.
+RADIUS=230
 
 if ! command -v magick >/dev/null 2>&1; then
     echo "error: ImageMagick's 'magick' command is required (brew install imagemagick)" >&2
     exit 1
 fi
 
+if [ ! -f "$SRC" ]; then
+    echo "error: $SRC not found" >&2
+    exit 1
+fi
+
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-# Shared blade silhouette: flat-cut base at y=820, near-parallel "heel" for
-# the first ~160px, a long asymmetric taper, then a flat-cut blunt tip
-# (width 32, vs. a base width of 200) instead of a needle point.
-BLADE_PATH='M 412 820
-            L 612 820
-            C 612 764 608 706 598 656
-            C 582 500 546 320 528 224
-            L 528 208
-            L 496 208
-            L 496 224
-            C 478 320 442 500 426 656
-            C 416 706 412 764 412 820
-            Z'
+# The bounding box of what is *solidly* opaque. Thresholding the alpha at
+# 90% first is what excludes the source's soft drop shadow: a plain `-trim`
+# would include it and leave the square floating inside its own shadow's
+# box, off-centre and too small.
+BOX="$(magick "$SRC" -alpha extract -threshold 90% -format '%@' info:)"
+BOX_W="${BOX%%x*}"
+BOX_REST="${BOX#*x}"
+BOX_H="${BOX_REST%%+*}"
+SQUARE=$(( BOX_W > BOX_H ? BOX_W : BOX_H ))
 
-cat > "$WORK/icon.svg" << EOF
-<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
-  <rect x="0" y="0" width="1024" height="1024" rx="184" ry="184" fill="#1C1C1E"/>
-  <path d="$BLADE_PATH" fill="#C9A227"/>
-  <path d="M 506 748 L 518 748 L 512 288 Z" fill="#8A6B12"/>
-</svg>
-EOF
+# The art's average colour, used to fill the source's own rounded corners
+# and any padding needed to square the crop. Every pixel it fills is inside
+# the corner radius that gets masked away below, so it is never seen — it
+# exists so those pixels are opaque rather than transparent, which is what
+# keeps the system from reading the icon as a partial-canvas legacy one.
+FILL="$(magick "$SRC" -crop "$BOX" +repage -resize 1x1! -alpha off -format '#%[hex:p{0,0}]' info:)"
 
-cat > "$WORK/icon-small.svg" << EOF
-<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
-  <rect x="0" y="0" width="1024" height="1024" rx="184" ry="184" fill="#1C1C1E"/>
-  <path d="$BLADE_PATH" fill="#C9A227"/>
-</svg>
-EOF
+magick "$SRC" \
+    -crop "$BOX" +repage \
+    -background "$FILL" -alpha remove -alpha off \
+    -gravity center -extent "${SQUARE}x${SQUARE}" \
+    -resize "${CANVAS}x${CANVAS}!" \
+    "$WORK/square.png"
 
-magick -background none "$WORK/icon.svg" -resize 1024x1024 "$WORK/master.png"
-magick -background none "$WORK/icon-small.svg" -resize 1024x1024 "$WORK/master-small.png"
+magick "$WORK/square.png" \
+    \( -size "${CANVAS}x${CANVAS}" xc:none \
+       -fill white \
+       -draw "roundrectangle 0,0 $((CANVAS - 1)),$((CANVAS - 1)) ${RADIUS},${RADIUS}" \) \
+    -alpha off -compose CopyOpacity -composite \
+    "$WORK/master.png"
 
 ICONSET="$WORK/Reed.iconset"
 mkdir -p "$ICONSET"
 
-# Below 128px the spine anti-aliases into mush — those sizes render from
-# the spine-free master instead.
-render() {
-    local px="$1" name="$2"
-    local source="$WORK/master.png"
-    if [ "$px" -lt 128 ]; then
-        source="$WORK/master-small.png"
-    fi
-    magick "$source" -resize "${px}x${px}" "$ICONSET/$name"
-}
-
+# Every size renders from the same master. The previous brass design needed
+# a second, detail-free variant below 128px because its spine turned to mush
+# at small sizes; five thick bars have no such detail to lose.
 for size in 16 32 128 256 512; do
-    render "$size" "icon_${size}x${size}.png"
+    magick "$WORK/master.png" -resize "${size}x${size}" "$ICONSET/icon_${size}x${size}.png"
     double=$((size * 2))
-    render "$double" "icon_${size}x${size}@2x.png"
+    magick "$WORK/master.png" -resize "${double}x${double}" "$ICONSET/icon_${size}x${size}@2x.png"
 done
 
 iconutil -c icns "$ICONSET" -o "$OUT"
