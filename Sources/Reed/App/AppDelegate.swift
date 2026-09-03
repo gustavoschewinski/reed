@@ -29,6 +29,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let session: DictationSession
     private let overlay = OverlayPanel()
     private let hotkeyMonitor = HotkeyMonitor()
+    /// The second shortcut (`.proofread`): the same recording gesture,
+    /// with an LLM pass before delivery. A separate monitor rather than a
+    /// mode flag on the first, so each shortcut keeps its own press
+    /// timing — see `HotkeyMonitor`'s doc comment.
+    private let proofreadHotkeyMonitor = HotkeyMonitor(name: .proofread)
     private var stateObservation: AnyCancellable?
     /// Global escape monitor (Item 3): `OverlayPanel` can never become key
     /// (see its own doc comment — the synthetic ⌘V a paste depends on would
@@ -129,32 +134,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard event.keyCode == 53 else { return }  // kVK_Escape
             guard let self else { return }
             switch self.session.state {
-            case .recording, .transcribing: self.session.cancel()
+            case .recording, .transcribing, .proofreading: self.session.cancel()
             case .idle, .delivering: break
             }
         }
 
         hotkeyMonitor.dictationMode = { [settings] in settings.dictationMode }
         hotkeyMonitor.onGesture = { [weak self] gesture in
-            guard let self else { return }
-            // Recording must be impossible until onboarding — and with it,
-            // the model — is ready (see the brief). This is the one path
-            // that could reach `session` before that: a shortcut left over
-            // from a previous run's `UserDefaults`, fired before this run's
-            // onboarding has completed. Rather than let it silently do
-            // nothing, bring the onboarding window forward — visible state
-            // beats a shortcut that appears to do nothing at all.
-            guard settings.hasCompletedOnboarding else {
-                showOnboardingWindow()
-                return
-            }
-            switch gesture {
-            case .tap: session.toggle()
-            case .holdStart: session.begin()
-            case .holdEnd: session.end()
-            }
+            self?.handle(gesture: gesture, proofread: false)
         }
         hotkeyMonitor.activate()
+
+        // The same interpretation of a press (tap, hold-to-talk,
+        // automatic) applies to both shortcuts: it describes how the user
+        // holds a key, which has nothing to do with what happens to the
+        // text afterwards.
+        proofreadHotkeyMonitor.dictationMode = { [settings] in settings.dictationMode }
+        proofreadHotkeyMonitor.onGesture = { [weak self] gesture in
+            self?.handle(gesture: gesture, proofread: true)
+        }
+        proofreadHotkeyMonitor.activate()
 
         if !settings.hasCompletedOnboarding {
             showOnboardingWindow()
@@ -169,6 +168,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // .prepare()` memoizes on its own, so warming it here is free
             // if a real dictation gets there first anyway.
             warmModel()
+        }
+    }
+
+    /// Both shortcuts land here; `proofread` is the only difference
+    /// between them.
+    ///
+    /// Two guards run before anything reaches `session`, in this order:
+    ///
+    /// 1. **Onboarding.** Recording must be impossible until onboarding —
+    ///    and with it, the model — is ready. A shortcut left over from a
+    ///    previous run's `UserDefaults` can fire before this run's
+    ///    onboarding has completed; rather than let it silently do
+    ///    nothing, bring the onboarding window forward.
+    /// 2. **Proofreading setup.** A proofreading shortcut with no OpenAI
+    ///    key or model saved refuses to record at all, and says so in the
+    ///    overlay. Recording first and failing at the end would mean
+    ///    speaking an entire message only to be told the feature was never
+    ///    configured — and `.holdEnd` would have no way to report it,
+    ///    since nothing was ever started.
+    private func handle(gesture: HotkeyGesture, proofread: Bool) {
+        guard settings.hasCompletedOnboarding else {
+            showOnboardingWindow()
+            return
+        }
+
+        // Only ever blocks a gesture that would *start* a recording.
+        // Stopping one must always get through: a key cleared in Settings
+        // while a hold was in progress would otherwise swallow the
+        // `.holdEnd` and strand the session in `.recording` with the
+        // microphone open and no way to stop it.
+        if proofread && !settings.isProofreadConfigured && wouldStartRecording(gesture) {
+            session.reportProblem(
+                "Proofreading isn't set up yet. Add your OpenAI API key in Settings, "
+                    + "then this shortcut will work."
+            )
+            return
+        }
+
+        switch gesture {
+        case .tap: session.toggle(proofread: proofread)
+        case .holdStart: session.begin(proofread: proofread)
+        case .holdEnd: session.end()
+        }
+    }
+
+    /// Whether this gesture would begin a new recording, as opposed to
+    /// ending one already running. `.tap` is the ambiguous one — it starts
+    /// from `.idle` and stops from `.recording` — so it has to be answered
+    /// against the session's current state rather than from the gesture
+    /// alone.
+    private func wouldStartRecording(_ gesture: HotkeyGesture) -> Bool {
+        switch gesture {
+        case .holdStart: return true
+        case .holdEnd: return false
+        case .tap: return session.state == .idle
         }
     }
 
@@ -263,7 +317,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard !Task.isCancelled else { return }
                 self?.overlay.hide()
             }
-        case .recording, .transcribing, .delivering:
+        case .recording, .transcribing, .proofreading, .delivering:
             overlay.show(session: session)
         }
     }

@@ -41,6 +41,20 @@ struct SettingsView: View {
     @State private var microphoneStatus: AVAuthorizationStatus = .authorized
     @State private var requestingMicrophoneAccess = false
 
+    /// The chat models this account can use, fetched from OpenAI rather
+    /// than hard-coded — a list baked into Reed would start going stale
+    /// the week after it shipped. Empty until a fetch succeeds, which is
+    /// why the picker below always keeps an entry for the saved model
+    /// regardless (see `missingDeviceID` for the same problem, and the
+    /// same fix, in the microphone picker).
+    @State private var proofreadModels: [String] = []
+    @State private var loadingModels = false
+    @State private var modelsError: String?
+    /// Debounces the fetch triggered by editing the key field, so typing a
+    /// key out by hand is one request at the end rather than one per
+    /// keystroke. Held so each new keystroke can cancel the last.
+    @State private var modelFetchTask: Task<Void, Never>?
+
     /// Pickers are given a fixed width so the two of them line up down the
     /// right edge instead of each sizing to its own longest option.
     private let controlWidth: CGFloat = 220
@@ -94,6 +108,83 @@ struct SettingsView: View {
                         }
                         .labelsHidden()
                         .accessibilityLabel("When you press it")
+                        .frame(width: controlWidth)
+                    }
+                }
+
+                group("Proofreading") {
+                    Field(
+                        title: "Proofreading shortcut",
+                        note: "Records exactly like the shortcut above, then has OpenAI fix "
+                            + "the spelling and grammar before pasting. Leave it unset if you "
+                            + "only want plain dictation."
+                    ) {
+                        KeyboardShortcuts.Recorder(for: .proofread)
+                    }
+                    Rule()
+                    Field(
+                        title: "OpenAI API key",
+                        note: "Kept in your Mac's Keychain, never in Reed's preferences file. "
+                            + "It is used for nothing but the text you dictate with the "
+                            + "shortcut above — plain dictation still never leaves your Mac."
+                    ) {
+                        SecureField("sk-…", text: $settings.openAIAPIKey)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: controlWidth)
+                            .accessibilityLabel("OpenAI API key")
+                            .onChange(of: settings.openAIAPIKey) { _, _ in
+                                keyDidChange()
+                            }
+                    }
+                    Rule()
+                    Field(title: "Model", note: modelNote) {
+                        HStack(spacing: Theme.Space.xs) {
+                            Picker("", selection: $settings.proofreadModel) {
+                                // Same reasoning as the microphone picker's
+                                // placeholder: without an entry matching the
+                                // saved model, macOS silently reassigns the
+                                // selection to the first item and writes it
+                                // back through the binding — changing a
+                                // stored setting merely by rendering this
+                                // view. Here it also covers the ordinary
+                                // case of the list not having been fetched
+                                // yet, which is most of the time.
+                                if !proofreadModels.contains(settings.proofreadModel) {
+                                    Text(settings.proofreadModel).tag(settings.proofreadModel)
+                                }
+                                ForEach(proofreadModels, id: \.self) { model in
+                                    Text(model).tag(model)
+                                }
+                            }
+                            .labelsHidden()
+                            .accessibilityLabel("Proofreading model")
+
+                            Button {
+                                loadProofreadModels()
+                            } label: {
+                                Image(systemName: "arrow.clockwise")
+                            }
+                            .buttonStyle(.borderless)
+                            .controlSize(.small)
+                            .disabled(loadingModels || settings.openAIAPIKey.isEmpty)
+                            .accessibilityLabel("Refresh model list")
+                        }
+                        .frame(width: controlWidth)
+                    }
+                    Rule()
+                    Field(
+                        title: "What it may change",
+                        note: settings.proofreadStyle == .correct
+                            ? "Mistakes only. Your wording, tone and jargon come back untouched."
+                            : "Mistakes, plus a lighter touch on sentences that are hard to "
+                                + "follow. Some words will come back rewritten."
+                    ) {
+                        Picker("", selection: $settings.proofreadStyle) {
+                            Text("Fix mistakes").tag(ProofreadStyle.correct)
+                            Text("Fix and clarify").tag(ProofreadStyle.polish)
+                        }
+                        .labelsHidden()
+                        .accessibilityLabel("What it may change")
                         .frame(width: controlWidth)
                     }
                 }
@@ -175,6 +266,101 @@ struct SettingsView: View {
         launchAtLogin = LaunchAtLogin.isEnabled
         accessibilityGranted = TextDelivery.accessibilityGranted
         microphoneStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+        // Only when there is a key to use and nothing fetched yet: this
+        // runs on every `didBecomeKey`, and re-fetching a list that hasn't
+        // changed on every window focus would be a network call for
+        // nothing.
+        if proofreadModels.isEmpty && !settings.openAIAPIKey.isEmpty && !loadingModels {
+            loadProofreadModels()
+        }
+    }
+
+    /// What to say under the model picker. Four states, and each one needs
+    /// a different sentence: nothing typed yet, a fetch in flight, a fetch
+    /// that failed, and a list in hand.
+    private var modelNote: String {
+        if settings.openAIAPIKey.isEmpty {
+            return "Add your API key above and Reed will list the models your account can use."
+        }
+        if loadingModels {
+            return "Loading the models your account can use…"
+        }
+        if let modelsError {
+            return modelsError
+        }
+        return "Any chat model works. Smaller ones are faster, and proofreading is not a "
+            + "job that needs a large one."
+    }
+
+    /// A key was edited. Whatever is in the picker came from the old key,
+    /// so it goes — a stale list is worse than an empty one, because it
+    /// looks authoritative.
+    ///
+    /// The fetch that follows is debounced rather than immediate: this
+    /// fires on every keystroke, and a key typed out by hand would
+    /// otherwise be fifty requests, each one rejected, each one leaving a
+    /// different error under the picker.
+    private func keyDidChange() {
+        proofreadModels = []
+        modelsError = nil
+        modelFetchTask?.cancel()
+
+        guard !settings.openAIAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            modelFetchTask = nil
+            return
+        }
+
+        modelFetchTask = Task {
+            try? await Task.sleep(for: .milliseconds(700))
+            guard !Task.isCancelled else { return }
+            loadProofreadModels()
+        }
+    }
+
+    /// Fetches the account's models for the picker. Failures land in
+    /// `modelsError` under the picker rather than in an alert: nothing is
+    /// broken — the saved model still works — so this is a note, not an
+    /// interruption.
+    private func loadProofreadModels() {
+        let key = settings.openAIAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty, !loadingModels else { return }
+
+        loadingModels = true
+        modelsError = nil
+        Task {
+            do {
+                proofreadModels = try await OpenAIModelCatalog.models(apiKey: key)
+                if proofreadModels.isEmpty {
+                    modelsError = "OpenAI listed no chat models for this key."
+                }
+            } catch let error as ProofreadError {
+                modelsError = Self.modelsErrorMessage(for: error)
+            } catch {
+                modelsError = "Reed couldn't reach OpenAI to list the models."
+            }
+            loadingModels = false
+        }
+    }
+
+    /// The pill's wording (`ProofreadError.deliveryProblem`) is written for
+    /// a dictation that already happened and always ends with "pasted as
+    /// dictated" — which would be nonsense here, where nothing was
+    /// dictated and nothing was pasted. Same causes, said for this screen.
+    private static func modelsErrorMessage(for error: ProofreadError) -> String {
+        switch error {
+        case .unauthorized:
+            return "OpenAI rejected this API key."
+        case .rateLimited:
+            return "OpenAI is rate-limiting this key. Try again in a moment."
+        case .server(let code):
+            return "OpenAI had a server error (\(code)). Try again in a moment."
+        case .rejected(let message):
+            return "OpenAI couldn't list the models. \(message)"
+        case .unreachable:
+            return "Reed couldn't reach OpenAI to list the models."
+        case .notConfigured, .empty:
+            return "OpenAI didn't return a usable list of models."
+        }
     }
 
     // MARK: - Building blocks

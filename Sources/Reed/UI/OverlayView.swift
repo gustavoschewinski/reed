@@ -260,27 +260,56 @@ struct OverlayView: View {
                 }
             )
 
-            Waveform(session: session)
+            if session.state == .proofreading {
+                proofreadingIndicator
+            } else {
+                Waveform(session: session)
 
-            // TimelineView, not `Timer.publish` + `onReceive`: the level
-            // meter re-renders this view ~10×/s, and `onReceive` would
-            // resubscribe to a freshly created timer each render — which
-            // therefore never survives long enough to fire, freezing the
-            // clock at 0:00.
-            TimelineView(.periodic(from: .now, by: 1)) { context in
-                Text(elapsedString(at: context.date))
-                    .font(Theme.monoFont)
-                    .monospacedDigit()
+                // TimelineView, not `Timer.publish` + `onReceive`: the level
+                // meter re-renders this view ~10×/s, and `onReceive` would
+                // resubscribe to a freshly created timer each render — which
+                // therefore never survives long enough to fire, freezing the
+                // clock at 0:00.
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    Text(elapsedString(at: context.date))
+                        .font(Theme.monoFont)
+                        .monospacedDigit()
+                        .foregroundColor(Theme.textDim)
+                }
+
+                Image(systemName: "mic.fill")
+                    .font(.system(size: 10))
                     .foregroundColor(Theme.textDim)
+                    .accessibilityHidden(true)
             }
-
-            Image(systemName: "mic.fill")
-                .font(.system(size: 10))
-                .foregroundColor(Theme.textDim)
-                .accessibilityHidden(true)
         }
         .padding(.horizontal, Theme.paddingHorizontal)
         .padding(.vertical, Theme.paddingVertical)
+    }
+
+    /// Replaces the waveform, clock and mic glyph while the transcription
+    /// is out for proofreading. All three of those report on a microphone
+    /// that stopped recording a moment ago — a live-looking waveform here
+    /// would say Reed is still listening when it isn't.
+    ///
+    /// The stop control to its left stays exactly where it was, so the
+    /// pill neither resizes nor moves its one clickable target: escape and
+    /// that dot both still discard the result, which is the whole reason
+    /// this row keeps its shape.
+    private var proofreadingIndicator: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "sparkles")
+                .font(.system(size: 10))
+                .foregroundColor(Theme.textDim)
+                .accessibilityHidden(true)
+
+            Text("Proofreading…")
+                .font(.system(size: 12))
+                .foregroundColor(Theme.textDim)
+
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func elapsedString(at now: Date) -> String {

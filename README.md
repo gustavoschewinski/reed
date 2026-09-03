@@ -1,6 +1,6 @@
 # Reed
 
-Hold or tap a shortcut, speak, and the text appears in whatever app has focus — dictation that runs entirely on your Mac.
+Hold or tap a shortcut, speak, and the text appears in whatever app has focus — dictation that runs entirely on your Mac. A second, optional shortcut proofreads what you said before pasting it.
 
 ## Install
 
@@ -27,9 +27,30 @@ Reed does **not** need Input Monitoring.
 
 ## Privacy
 
-Transcription runs on-device using NVIDIA's Parakeet TDT v3 on the Neural Engine — nothing you say leaves your Mac. Audio is discarded the moment transcription finishes and is never written to disk; only the resulting text is stored, in your local history. The only network request Reed ever makes is the one-time model download on first run.
+Transcription runs on-device using NVIDIA's Parakeet TDT v3 on the Neural Engine — nothing you say leaves your Mac. Audio is discarded the moment transcription finishes and is never written to disk; only the resulting text is stored, in your local history.
+
+Reed makes exactly two kinds of network request, and one of them is optional. The first is the one-time model download on first run. The second only exists if you set up [proofreading](#proofreading): that shortcut sends the transcribed **text** (never the audio) to OpenAI. Plain dictation never does, whether or not proofreading is configured.
 
 25 languages are supported, auto-detected, including Portuguese and English. Measured on an M3, transcription runs about 23x real time — 2.79 seconds of speech takes 0.123 seconds to transcribe.
+
+## Proofreading
+
+An optional second shortcut. It records and transcribes exactly like the first one, then has an LLM fix the spelling and grammar before pasting — for the message you'd rather not send with a typo in it.
+
+Set it up in Settings → Proofreading: record a shortcut, paste an [OpenAI API key](https://platform.openai.com/api-keys), and pick a model. The model list is fetched from your own account, so anything you have access to is selectable. `gpt-5.4-mini` is the default and is a good one: proofreading takes it under a second and is not a job that needs a large model.
+
+Until both a key and a model are saved, the shortcut does nothing but say so — it won't record a message and then tell you at the end.
+
+**What it changes** is up to you:
+
+- **Fix mistakes** (the default) — spelling, accents, grammar, agreement, tense, punctuation, capitalization. Nothing else. Your wording, your tone and your jargon come back untouched.
+- **Fix and clarify** — the above, plus a lighter touch on sentences that are genuinely hard to follow. Some words will come back rewritten.
+
+Either way the prompt is built to leave technical writing alone: `merge`, `rebase`, `deploy`, `staging`, `PR`, file paths, code identifiers and URLs are treated as already correct rather than as words to be fixed. It never translates, so a message that mixes languages stays mixed. And it treats what you dictated as text to proofread rather than as instructions — dictating "write an email to the client explaining the delay" gets you that sentence, corrected, not an email.
+
+**If the proofread fails** — no network, a rejected key, a model that doesn't exist — Reed pastes the raw transcription anyway and explains what happened in the pill. A proofread that didn't work never costs you the words you spoke.
+
+Your API key is stored in your Mac's Keychain, not in Reed's preferences file.
 
 ## Troubleshooting
 
@@ -38,6 +59,8 @@ Transcription runs on-device using NVIDIA's Parakeet TDT v3 on the Neural Engine
 **The text doesn't appear in my app.** This almost always means Accessibility permission was skipped or dismissed during setup. Reed still transcribes correctly — the text is just left on the clipboard instead of typed in. Open Reed's Settings, or go to System Settings → Privacy & Security → Accessibility, and enable Reed. Paste the clipboard content in the meantime with ⌘V.
 
 **Nothing happens on the first launch.** The 600 MB model download and the one-time Neural Engine compile (~20 seconds) both happen before Reed is ready — watch for the progress bar rather than assuming it's hung.
+
+**The proofreading shortcut does nothing.** It's inert until Settings → Proofreading has both an API key and a model saved; press it and the pill will say so. If it's configured and still failing, the pill names the cause — a rejected key, a model your account can't use, or no network — and your text is pasted unproofread rather than lost.
 
 **Debug logging.** If something above doesn't explain what you're seeing, launch Reed with debug logging turned on:
 

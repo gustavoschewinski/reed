@@ -31,9 +31,25 @@ final class Settings: ObservableObject {
         static let pauseMediaWhileRecording = "reed.settings.pauseMediaWhileRecording"
         static let hasCompletedOnboarding = "reed.settings.hasCompletedOnboarding"
         static let dictationMode = "reed.settings.dictationMode"
+        static let proofreadModel = "reed.settings.proofreadModel"
+        static let proofreadStyle = "reed.settings.proofreadStyle"
     }
 
+    /// The Keychain account the OpenAI key is stored under — see
+    /// `SecretStore`. Not a `UserDefaults` key, and deliberately not in
+    /// `Keys` above, so the two can never be confused for one another.
+    private enum Secrets {
+        static let openAIAPIKey = "openai.apiKey"
+    }
+
+    /// What every chat model in an OpenAI account can be measured against:
+    /// fast enough that the pause between speaking and pasting stays under
+    /// a second, and cheap enough to run on every dictation. The user can
+    /// pick anything else in Settings; this is only what they start with.
+    static let defaultProofreadModel = "gpt-5.4-mini"
+
     private let defaults: any UserDefaultsLike
+    private let secrets: any SecretStore
 
     /// The input device to record from. `nil` means "use the system default".
     @Published var inputDeviceID: AudioDeviceID? {
@@ -70,8 +86,47 @@ final class Settings: ObservableObject {
         didSet { defaults.set(dictationMode.rawValue, forKey: Keys.dictationMode) }
     }
 
-    init(defaults: any UserDefaultsLike = UserDefaults.standard) {
+    /// The OpenAI key used for proofreading. Backed by the Keychain, not
+    /// `UserDefaults` — see `SecretStore`. Published like every other
+    /// preference so Settings' picker can enable itself the moment a key
+    /// is typed, and blank (never nil) so the `SecureField` bound to it
+    /// needs no unwrapping.
+    @Published var openAIAPIKey: String {
+        didSet {
+            guard oldValue != openAIAPIKey else { return }
+            secrets.setSecret(openAIAPIKey, forKey: Secrets.openAIAPIKey)
+        }
+    }
+
+    /// Which OpenAI model proofreads. A stored string rather than an enum:
+    /// the list is fetched live from the user's own account (see
+    /// `OpenAIModelCatalog`), so a model that ships next month has to be
+    /// selectable without Reed shipping again.
+    @Published var proofreadModel: String {
+        didSet { defaults.set(proofreadModel, forKey: Keys.proofreadModel) }
+    }
+
+    @Published var proofreadStyle: ProofreadStyle {
+        didSet { defaults.set(proofreadStyle.rawValue, forKey: Keys.proofreadStyle) }
+    }
+
+    /// Whether the proofreading shortcut can do anything at all. Both
+    /// halves are required, and neither has a usable fallback: without a
+    /// key there is nothing to authenticate with, and without a model
+    /// there is nothing to ask. `AppDelegate` checks this before the
+    /// shortcut is allowed to start a recording, so an unconfigured press
+    /// explains itself instead of dictating and then failing at the end.
+    var isProofreadConfigured: Bool {
+        !openAIAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !proofreadModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    init(
+        defaults: any UserDefaultsLike = UserDefaults.standard,
+        secrets: any SecretStore = Keychain()
+    ) {
         self.defaults = defaults
+        self.secrets = secrets
         defaults.register(defaults: [
             Keys.playSounds: true,
             Keys.muteWhileRecording: true,
@@ -85,6 +140,8 @@ final class Settings: ObservableObject {
             Keys.pauseMediaWhileRecording: false,
             Keys.hasCompletedOnboarding: false,
             Keys.dictationMode: DictationMode.toggle.rawValue,
+            Keys.proofreadModel: Self.defaultProofreadModel,
+            Keys.proofreadStyle: ProofreadStyle.correct.rawValue,
         ])
 
         if defaults.object(forKey: Keys.inputDeviceID) != nil {
@@ -101,5 +158,17 @@ final class Settings: ObservableObject {
         } else {
             dictationMode = .toggle
         }
+        proofreadModel =
+            (defaults.object(forKey: Keys.proofreadModel) as? String) ?? Self.defaultProofreadModel
+        if let raw = defaults.object(forKey: Keys.proofreadStyle) as? String,
+            let style = ProofreadStyle(rawValue: raw) {
+            proofreadStyle = style
+        } else {
+            proofreadStyle = .correct
+        }
+        // Read once at construction, not on every access: `SecItemCopyMatching`
+        // is a synchronous XPC round trip to `securityd`, and `isProofreadConfigured`
+        // is read from a hotkey handler.
+        openAIAPIKey = secrets.secret(forKey: Secrets.openAIAPIKey) ?? ""
     }
 }

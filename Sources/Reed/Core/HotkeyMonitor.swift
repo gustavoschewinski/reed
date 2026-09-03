@@ -3,6 +3,12 @@ import KeyboardShortcuts
 
 extension KeyboardShortcuts.Name {
     static let dictate = Self("dictate")
+    /// The second shortcut: records exactly like `dictate`, then runs the
+    /// transcription through an LLM before pasting it. Unset by default —
+    /// unlike `dictate`, onboarding never pre-fills this one, because a
+    /// shortcut that needs an API key to do anything shouldn't be occupying
+    /// a key combination for people who will never set one up.
+    static let proofread = Self("proofread")
 }
 
 extension Notification.Name {
@@ -13,6 +19,9 @@ extension Notification.Name {
     /// shortcut can be changed — posts it from the recorder's `onChange`,
     /// and the sidebar's status footer listens, so the two stay in
     /// agreement while both are on screen at once.
+    ///
+    /// Only the dictation shortcut posts this. The proofreading one has no
+    /// status footer reporting it, so there is nothing to keep in sync.
     static let reedShortcutDidChange = Notification.Name("reed.shortcutDidChange")
 }
 
@@ -115,8 +124,16 @@ struct HotkeyInterpreter: Sendable {
 ///
 /// KeyboardShortcuts registers through Carbon's `RegisterEventHotKey`, which
 /// needs no Input Monitoring permission — one fewer prompt for the user.
+/// One instance per shortcut: `AppDelegate` runs two, one for `.dictate`
+/// and one for `.proofread`. Each keeps its own `HotkeyInterpreter`, which
+/// is what makes them independent — a hold on one shortcut has its own
+/// press timestamp and its own hold timer, and cannot be ended by a
+/// release of the other.
 @MainActor
 final class HotkeyMonitor {
+    /// Which global shortcut this monitor watches.
+    private let name: KeyboardShortcuts.Name
+
     var onGesture: ((HotkeyGesture) -> Void)?
 
     /// Read fresh on every press and release, so a mode change made in
@@ -130,6 +147,13 @@ final class HotkeyMonitor {
     private var holdTimer: Task<Void, Never>?
     private var isActivated = false
 
+    /// Defaults to `.dictate` so every call site (and every test) written
+    /// before the second shortcut existed keeps meaning exactly what it
+    /// said.
+    init(name: KeyboardShortcuts.Name = .dictate) {
+        self.name = name
+    }
+
     /// Monotonic, unlike wall-clock time, which can jump.
     private var now: Double { ProcessInfo.processInfo.systemUptime }
 
@@ -139,7 +163,7 @@ final class HotkeyMonitor {
         guard !isActivated else { return }
         isActivated = true
 
-        KeyboardShortcuts.onKeyDown(for: .dictate) { [weak self] in
+        KeyboardShortcuts.onKeyDown(for: name) { [weak self] in
             guard let self else { return }
             let mode = self.dictationMode()
             if let gesture = self.interpreter.keyDown(at: self.now, mode: mode) {
@@ -162,7 +186,7 @@ final class HotkeyMonitor {
             }
         }
 
-        KeyboardShortcuts.onKeyUp(for: .dictate) { [weak self] in
+        KeyboardShortcuts.onKeyUp(for: name) { [weak self] in
             guard let self else { return }
             self.holdTimer?.cancel()
             self.holdTimer = nil

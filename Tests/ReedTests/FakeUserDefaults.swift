@@ -44,3 +44,28 @@ final class FakeUserDefaults: UserDefaultsLike {
     @discardableResult
     func synchronize() -> Bool { true }
 }
+
+/// In-memory `SecretStore`, for the same reason `FakeUserDefaults` exists:
+/// `swift test` must never write to the real Keychain, where an item would
+/// outlive the test run, prompt for access, and be invisible to anyone
+/// wondering why their login keychain has a Reed entry in it.
+final class FakeSecretStore: SecretStore, @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [String: String] = [:]
+
+    func secret(forKey key: String) -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage[key]
+    }
+
+    func setSecret(_ secret: String?, forKey key: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        if let secret, !secret.isEmpty {
+            storage[key] = secret
+        } else {
+            storage.removeValue(forKey: key)
+        }
+    }
+}

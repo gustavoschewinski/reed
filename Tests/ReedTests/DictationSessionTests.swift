@@ -214,6 +214,41 @@ private actor OrderingTranscriber: Transcriber {
 
 // MARK: - Helper
 
+/// Stands in for OpenAI. Records what it was asked and answers with
+/// whatever the test scripted — a corrected string, or a failure.
+private final class FakeProofreader: ProofreadService, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _requests: [ProofreadRequest] = []
+    var requests: [ProofreadRequest] {
+        lock.lock()
+        defer { lock.unlock() }
+        return _requests
+    }
+
+    private let result: Result<String, ProofreadError>
+    /// Held open long enough for a test to press escape while the call is
+    /// still out — the one suspension in the pipeline a user can act
+    /// during.
+    private let delay: Duration
+
+    init(result: Result<String, ProofreadError>, delay: Duration = .zero) {
+        self.result = result
+        self.delay = delay
+    }
+
+    private func record(_ request: ProofreadRequest) {
+        lock.lock()
+        _requests.append(request)
+        lock.unlock()
+    }
+
+    func proofread(_ request: ProofreadRequest) async throws -> String {
+        record(request)
+        if delay != .zero { try? await Task.sleep(for: delay) }
+        return try result.get()
+    }
+}
+
 @MainActor
 private func makeSession(
     media: MediaControl = FakeMediaControl(),
@@ -224,6 +259,7 @@ private func makeSession(
     passes: [TranscriptionPass] = [],
     transcriber: (any Transcriber)? = nil,
     clipboard: FakeClipboard = FakeClipboard(),
+    proofreader: (any ProofreadService)? = nil,
     canPaste: Bool = true,
     paste: (() -> Void)? = nil,
     passInterval: Duration = .milliseconds(5),
@@ -264,6 +300,12 @@ private func makeSession(
         mediaControl: media,
         store: store,
         settings: settings,
+        // Never the real `OpenAIProofreader`: `swift test` must not be
+        // able to make a network call, and a session whose proofreader is
+        // never reached (every test but the proofreading ones) is better
+        // served by one that would fail loudly than by one that would
+        // quietly try to phone OpenAI.
+        proofreader: proofreader ?? FakeProofreader(result: .failure(ProofreadError.unreachable)),
         clipboard: clipboard,
         canPaste: canPaste,
         paste: paste ?? {},
@@ -1148,4 +1190,280 @@ private final class RequestedBox {
     #expect(session.previewText == "the real final transcript")
     #expect(session.confirmedText == "the real final transcript")
     #expect(session.hypothesisText.isEmpty)
+}
+
+// MARK: - Proofreading
+
+/// Settings with a key and a model saved, so `DictationSession.proofread`
+/// gets past its own configuration backstop.
+@MainActor
+private func proofreadableSettings() -> Settings {
+    let settings = Settings(defaults: FakeUserDefaults(), secrets: FakeSecretStore())
+    settings.openAIAPIKey = "sk-test"
+    settings.proofreadModel = "gpt-5.4-mini"
+    return settings
+}
+
+@MainActor
+@Test func proofreadingPastesTheCorrectedTextRatherThanTheRawOne() async throws {
+    let clipboard = FakeClipboard()
+    let proofreader = FakeProofreader(result: .success("Você já fez o merge da branch?"))
+    let session = try makeSession(
+        settings: proofreadableSettings(),
+        passes: [pass("vc ja fez o merge da branch")],
+        clipboard: clipboard,
+        proofreader: proofreader,
+        canPaste: false
+    )
+
+    session.begin(proofread: true)
+    await session.end()?.value
+
+    #expect(clipboard.string == "Você já fez o merge da branch?")
+    #expect(proofreader.requests.count == 1)
+    #expect(proofreader.requests.first?.text == "vc ja fez o merge da branch")
+}
+
+@MainActor
+@Test func plainDictationNeverCallsTheProofreader() async throws {
+    let clipboard = FakeClipboard()
+    let proofreader = FakeProofreader(result: .success("rewritten"))
+    let session = try makeSession(
+        settings: proofreadableSettings(),
+        passes: [pass("hello there")],
+        clipboard: clipboard,
+        proofreader: proofreader,
+        canPaste: false
+    )
+
+    session.begin()
+    await session.end()?.value
+
+    #expect(proofreader.requests.isEmpty)
+    #expect(clipboard.string == "hello there")
+}
+
+@MainActor
+@Test func proofreadingSendsTheSavedKeyModelAndStyle() async throws {
+    let settings = proofreadableSettings()
+    settings.proofreadModel = "gpt-4.1-mini"
+    settings.proofreadStyle = .polish
+    settings.openAIAPIKey = "sk-chosen"
+    let proofreader = FakeProofreader(result: .success("ok"))
+    let session = try makeSession(
+        settings: settings,
+        passes: [pass("texto")],
+        proofreader: proofreader,
+        canPaste: false
+    )
+
+    session.begin(proofread: true)
+    await session.end()?.value
+
+    let request = try #require(proofreader.requests.first)
+    #expect(request.model == "gpt-4.1-mini")
+    #expect(request.apiKey == "sk-chosen")
+    #expect(request.style == .polish)
+}
+
+@MainActor
+@Test func aFailedProofreadStillPastesTheRawTranscriptionAndSaysWhy() async throws {
+    let clipboard = FakeClipboard()
+    let session = try makeSession(
+        settings: proofreadableSettings(),
+        passes: [pass("vc ja fez o merge")],
+        clipboard: clipboard,
+        proofreader: FakeProofreader(result: .failure(.unauthorized)),
+        canPaste: true
+    )
+
+    session.begin(proofread: true)
+    await session.end()?.value
+
+    // Pasting, not just copying: with Accessibility granted there is no
+    // second problem competing for the pill, so the one the user sees is
+    // the proofread failure — see
+    // `missingAccessibilityOutranksAFailedProofreadInTheOverlay` for the
+    // deliberate other half of that rule.
+    //
+    // The whole point: a proofread that fails must never cost the user
+    // the words they actually spoke.
+    #expect(clipboard.string == "vc ja fez o merge")
+    #expect(session.problem == ProofreadError.unauthorized.deliveryProblem)
+    #expect(session.state == .idle)
+}
+
+@MainActor
+@Test func aFailedProofreadStillStoresWhatWasDelivered() async throws {
+    let store = try TranscriptStore(inMemory: true)
+    let session = try makeSession(
+        store: store,
+        settings: proofreadableSettings(),
+        passes: [pass("raw words")],
+        proofreader: FakeProofreader(result: .failure(.unreachable)),
+        canPaste: false
+    )
+
+    session.begin(proofread: true)
+    await session.end()?.value
+
+    #expect(store.all().map(\.text) == ["raw words"])
+}
+
+@MainActor
+@Test func historyRecordsTheProofreadTextBecauseThatIsWhatWasPasted() async throws {
+    let store = try TranscriptStore(inMemory: true)
+    let session = try makeSession(
+        store: store,
+        settings: proofreadableSettings(),
+        passes: [pass("vc ja fez o merge")],
+        proofreader: FakeProofreader(result: .success("Você já fez o merge?")),
+        canPaste: false
+    )
+
+    session.begin(proofread: true)
+    await session.end()?.value
+
+    #expect(store.all().map(\.text) == ["Você já fez o merge?"])
+}
+
+@MainActor
+@Test func theOverlayEntersProofreadingAndEndsShowingTheCorrectedText() async throws {
+    let session = try makeSession(
+        settings: proofreadableSettings(),
+        passes: [pass("vc ja fez o merge")],
+        proofreader: FakeProofreader(result: .success("Você já fez o merge?"), delay: .milliseconds(80)),
+        canPaste: false
+    )
+
+    session.begin(proofread: true)
+    let finished = session.end()
+
+    #expect(await waitUntil { session.state == .proofreading })
+    // The raw transcription shows while the call is out — never the live
+    // preview's last guess, which is about to be replaced.
+    #expect(session.previewText == "vc ja fez o merge")
+
+    await finished?.value
+    #expect(session.state == .idle)
+    #expect(session.previewText == "Você já fez o merge?")
+}
+
+@MainActor
+@Test func escapeDuringProofreadingDiscardsInsteadOfPasting() async throws {
+    let clipboard = FakeClipboard()
+    let store = try TranscriptStore(inMemory: true)
+    let session = try makeSession(
+        store: store,
+        settings: proofreadableSettings(),
+        passes: [pass("vc ja fez o merge")],
+        clipboard: clipboard,
+        proofreader: FakeProofreader(result: .success("Você já fez o merge?"), delay: .milliseconds(80)),
+        canPaste: false
+    )
+
+    session.begin(proofread: true)
+    let finished = session.end()
+    #expect(await waitUntil { session.state == .proofreading })
+
+    session.cancel()
+    await finished?.value
+
+    #expect(clipboard.string == nil)
+    #expect(store.all().isEmpty)
+    #expect(session.previewText.isEmpty)
+    #expect(session.state == .idle)
+}
+
+@MainActor
+@Test func aKeyClearedMidRecordingFallsBackRatherThanCallingOpenAI() async throws {
+    let settings = proofreadableSettings()
+    let clipboard = FakeClipboard()
+    let proofreader = FakeProofreader(result: .success("never used"))
+    let session = try makeSession(
+        settings: settings,
+        passes: [pass("raw words")],
+        clipboard: clipboard,
+        proofreader: proofreader,
+        canPaste: true
+    )
+
+    session.begin(proofread: true)
+    settings.openAIAPIKey = ""
+    await session.end()?.value
+
+    #expect(proofreader.requests.isEmpty)
+    #expect(clipboard.string == "raw words")
+    #expect(session.problem == ProofreadError.notConfigured.deliveryProblem)
+}
+
+@MainActor
+@Test func aRecordingStartedForProofreadingKeepsThatIntentWhenStoppedByTheOtherShortcut() async throws {
+    let proofreader = FakeProofreader(result: .success("corrected"))
+    let session = try makeSession(
+        settings: proofreadableSettings(),
+        passes: [pass("raw")],
+        proofreader: proofreader,
+        canPaste: false
+    )
+
+    // Started with the proofreading shortcut, stopped with the plain one:
+    // stopping is stopping, and the intent belongs to whoever started.
+    session.begin(proofread: true)
+    session.toggle(proofread: false)
+    await waitUntilIdle(session)
+
+    #expect(proofreader.requests.count == 1)
+}
+
+@MainActor
+@Test func missingAccessibilityOutranksAFailedProofreadInTheOverlay() async throws {
+    let session = try makeSession(
+        settings: proofreadableSettings(),
+        passes: [pass("raw words")],
+        proofreader: FakeProofreader(result: .failure(.unreachable)),
+        canPaste: false
+    )
+
+    session.begin(proofread: true)
+    await session.end()?.value
+
+    // Both went wrong. Only one of them needs the user to do something
+    // right now, and it is the one that means the text isn't in the app.
+    #expect(session.problem?.contains("⌘V") == true)
+}
+
+@MainActor
+@Test func reportProblemSurfacesAnUnconfiguredShortcutWithoutRecording() async throws {
+    let session = try makeSession(settings: proofreadableSettings())
+
+    session.reportProblem("Proofreading isn't set up yet.")
+
+    #expect(session.problem == "Proofreading isn't set up yet.")
+    #expect(session.state == .idle)
+}
+
+@MainActor
+@Test func reportProblemNeverOverwritesAFailureAlreadyInFlight() async throws {
+    let session = try makeSession(
+        settings: proofreadableSettings(),
+        passes: [pass("raw")],
+        proofreader: FakeProofreader(result: .success("ok"), delay: .milliseconds(80))
+    )
+
+    session.begin(proofread: true)
+    let finished = session.end()
+    #expect(await waitUntil { session.state == .proofreading })
+
+    session.reportProblem("should not appear")
+    #expect(session.problem != "should not appear")
+
+    await finished?.value
+}
+
+/// Waits for a session driven through `toggle()` (which discards the task
+/// `end()` returns) to come back to rest.
+@MainActor
+private func waitUntilIdle(_ session: DictationSession) async {
+    _ = await waitUntil { session.state == DictationState.idle }
 }

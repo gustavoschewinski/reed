@@ -1,3 +1,4 @@
+import KeyboardShortcuts
 import Testing
 @testable import Reed
 
@@ -147,4 +148,30 @@ import Testing
     #expect(interp.keyDown(at: 0, mode: .automatic) == nil)
     #expect(interp.elapsedCheck(at: 0.5, mode: .automatic) == .holdStart)
     #expect(interp.keyUp(at: 2.0, mode: .automatic) == .holdEnd)
+}
+
+// MARK: - Two shortcuts
+
+/// The two shortcuts are separate `KeyboardShortcuts.Name`s, so
+/// KeyboardShortcuts stores and registers them independently — setting one
+/// can never overwrite the other.
+@Test func theTwoShortcutsAreDistinctNames() {
+    #expect(KeyboardShortcuts.Name.dictate != KeyboardShortcuts.Name.proofread)
+    #expect(KeyboardShortcuts.Name.proofread.rawValue == "proofread")
+}
+
+/// Each monitor owns its own `HotkeyInterpreter` (see `HotkeyMonitor`'s doc
+/// comment). Without that, a hold on one shortcut and a release of the
+/// other would share one press timestamp — and one would end the other's
+/// recording.
+@MainActor
+@Test func eachShortcutInterpretsItsOwnPressesIndependently() {
+    var dictation = HotkeyInterpreter()
+    var proofreading = HotkeyInterpreter()
+
+    #expect(dictation.keyDown(at: 0, mode: .holdToTalk) == .holdStart)
+    // The other shortcut saw no press at all, so its release resolves on
+    // its own empty state rather than ending the hold above.
+    #expect(proofreading.keyUp(at: 1, mode: .automatic) == nil)
+    #expect(dictation.keyUp(at: 2, mode: .holdToTalk) == .holdEnd)
 }

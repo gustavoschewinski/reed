@@ -6,6 +6,11 @@ enum DictationState: Sendable, Equatable {
     case idle
     case recording
     case transcribing
+    /// The transcription is done and is being proofread by an LLM before
+    /// delivery. Only ever entered by a recording started with the
+    /// proofreading shortcut — a plain dictation goes straight from
+    /// `.transcribing` to `.delivering`, exactly as it always has.
+    case proofreading
     case delivering
 }
 
@@ -92,6 +97,7 @@ final class DictationSession: ObservableObject {
     private let mediaControl: any MediaControl
     private let store: TranscriptStore
     private let settings: Settings
+    private let proofreader: any ProofreadService
     private let clipboard: any ClipboardStore
     private let canPaste: Bool?
     private let paste: (() -> Void)?
@@ -156,10 +162,17 @@ final class DictationSession: ObservableObject {
     /// media, restore volume — run exactly once no matter how many exit
     /// paths call it.
     private var teardownRan = true
-    /// Set by `cancel()` when it lands during `.transcribing`. Checked once,
-    /// right before `completeEnd()` would deliver or store — not a new
-    /// state, just a discard flag on the result that's already in flight.
+    /// Set by `cancel()` when it lands during `.transcribing` or
+    /// `.proofreading`. Checked once, right before `completeEnd()` would
+    /// deliver or store — not a new state, just a discard flag on the
+    /// result that's already in flight.
     private var discardResult = false
+    /// Whether this recording was started by the proofreading shortcut.
+    /// Decided once, at `begin()`, and not re-read afterwards: a recording
+    /// started with one shortcut and stopped with the other keeps the
+    /// intent it was started with, which is the only reading that doesn't
+    /// depend on which key the user happened to release.
+    private var proofreadThisRecording = false
 
     init(
         recorder: any AudioRecording,
@@ -168,6 +181,7 @@ final class DictationSession: ObservableObject {
         mediaControl: any MediaControl,
         store: TranscriptStore,
         settings: Settings,
+        proofreader: any ProofreadService = OpenAIProofreader(),
         clipboard: any ClipboardStore = SystemClipboard(),
         canPaste: Bool? = nil,
         paste: (() -> Void)? = nil,
@@ -196,6 +210,7 @@ final class DictationSession: ObservableObject {
         self.mediaControl = mediaControl
         self.store = store
         self.settings = settings
+        self.proofreader = proofreader
         self.clipboard = clipboard
         self.canPaste = canPaste
         self.paste = paste
@@ -213,14 +228,20 @@ final class DictationSession: ObservableObject {
 
     // MARK: - Gestures
 
-    /// `.tap`: begin if idle, end if recording. Ignored while transcribing
-    /// or delivering — `begin()`/`end()` are no-ops outside their expected
-    /// starting state, so there is nothing to queue and nothing to crash.
-    func toggle() {
+    /// `.tap`: begin if idle, end if recording. Ignored while transcribing,
+    /// proofreading or delivering — `begin()`/`end()` are no-ops outside
+    /// their expected starting state, so there is nothing to queue and
+    /// nothing to crash.
+    ///
+    /// `proofread` only ever matters on the `.idle` branch, where a
+    /// recording is actually started. Stopping is stopping: a recording
+    /// begun with the dictation shortcut and ended with the proofreading
+    /// one is still a plain dictation, and vice versa.
+    func toggle(proofread: Bool = false) {
         switch state {
-        case .idle: begin()
+        case .idle: begin(proofread: proofread)
         case .recording: end()
-        case .transcribing, .delivering: break
+        case .transcribing, .proofreading, .delivering: break
         }
     }
 
@@ -231,9 +252,15 @@ final class DictationSession: ObservableObject {
     /// callers are free to discard it, same as `end()`'s; tests that need
     /// to observe the outcome of that prompt await it.
     @discardableResult
-    func begin() -> Task<Void, Never>? {
-        DebugLog.log("DictationSession.begin() entry, state=\(state)")
+    func begin(proofread: Bool = false) -> Task<Void, Never>? {
+        DebugLog.log("DictationSession.begin() entry, state=\(state), proofread=\(proofread)")
         guard state == .idle else { return nil }
+
+        // Recorded before the authorization branches below, so the
+        // `.notDetermined` path — which reaches `startRecording()` only
+        // after awaiting a system prompt — carries the same intent as the
+        // synchronous one.
+        proofreadThisRecording = proofread
 
         // Checked first, before anything else here touches audio: a
         // microphone that isn't authorized can't record, and attempting it
@@ -405,7 +432,11 @@ final class DictationSession: ObservableObject {
             state = .idle
             teardown()
 
-        case .transcribing:
+        case .transcribing, .proofreading:
+            // A proofread already in flight is not itself cancelled — the
+            // request is cheap and about to finish either way. What
+            // changes is that its result is thrown away rather than
+            // pasted, which is the whole meaning of escape here.
             guard !discardResult else { return }
             discardResult = true
             if settings.playSounds { playCue(.cancel) }
@@ -518,20 +549,74 @@ final class DictationSession: ObservableObject {
             return
         }
 
+        // The proofreading step (and the only thing that separates the two
+        // shortcuts). Everything above this point is identical for both;
+        // everything below delivers whatever `outgoing` ends up holding.
+        var outgoing = trimmed
+        var proofreadProblem: String?
+
+        if proofreadThisRecording {
+            state = .proofreading
+            // Show the raw transcription while the network call is out.
+            // The pill would otherwise sit on the live preview's last
+            // guess for a second or so — text that is about to be replaced
+            // and was never what got pasted.
+            previewText = trimmed
+            confirmedText = trimmed
+            hypothesisText = ""
+
+            do {
+                outgoing = try await proofread(trimmed)
+            } catch let error as ProofreadError {
+                proofreadProblem = error.deliveryProblem
+            } catch {
+                proofreadProblem = ProofreadError.unreachable.deliveryProblem
+            }
+            if let proofreadProblem {
+                NSLog("Reed: proofreading failed: %@", proofreadProblem)
+            }
+
+            // Escape can land during the call, which is the longest
+            // suspension in the whole pipeline — re-checked here rather
+            // than trusting the single check above, which happened before
+            // any of it.
+            guard !discardResult else {
+                previewText = ""
+                confirmedText = ""
+                hypothesisText = ""
+                state = .idle
+                DebugLog.log(
+                    "DictationSession.completeEnd() textLength=\(trimmed.count) "
+                        + "delivered=false stored=false (discarded during proofreading)")
+                return
+            }
+        }
+
         state = .delivering
         // Resolved once, here, rather than left for `TextDelivery.deliver`
         // to decide internally — this is the same fallback it would apply
         // on its own (`canPaste ?? accessibilityGranted`), just surfaced so
         // Item 2 can tell whether pasting actually happened.
         let effectiveCanPaste = canPaste ?? TextDelivery.accessibilityGranted
-        await TextDelivery.deliver(trimmed, clipboard: clipboard, canPaste: effectiveCanPaste, paste: paste)
+        await TextDelivery.deliver(outgoing, clipboard: clipboard, canPaste: effectiveCanPaste, paste: paste)
+        // A proofread that failed still delivered something — the raw
+        // transcription — so its explanation is set first and then
+        // deliberately overwritten by the Accessibility one when both
+        // apply. Between "your text wasn't proofread" and "your text isn't
+        // in the app at all, press ⌘V", only the second needs an action
+        // from the user right now.
+        problem = proofreadProblem
         if !effectiveCanPaste {
             problem = "Accessibility isn't granted, so that text was copied instead of typed in. "
                 + "Paste it with ⌘V, or open Settings to fix this for next time."
         }
 
         let duration = recordingStartedAt.map { Date().timeIntervalSince($0) } ?? 0
-        store.add(text: trimmed, duration: duration)
+        // What was actually pasted, not what was heard: History is the
+        // record of what Reed put into the other app, and a proofread
+        // message that can't be found there by the words it contains is
+        // not much of a record.
+        store.add(text: outgoing, duration: duration)
 
         if settings.playSounds { playCue(.stop) }
 
@@ -541,12 +626,48 @@ final class DictationSession: ObservableObject {
         // the whole recording and routinely differs from the preview's
         // last guess, so without this the pill's final frame could show
         // text that was never actually pasted.
-        previewText = trimmed
-        confirmedText = trimmed
+        previewText = outgoing
+        confirmedText = outgoing
         hypothesisText = ""
         state = .idle
         DebugLog.log(
-            "DictationSession.completeEnd() textLength=\(trimmed.count) delivered=\(effectiveCanPaste) stored=true")
+            "DictationSession.completeEnd() textLength=\(outgoing.count) "
+                + "delivered=\(effectiveCanPaste) stored=true "
+                + "proofread=\(proofreadThisRecording) proofreadFailed=\(proofreadProblem != nil)")
+    }
+
+    /// Builds the request from whatever is in Settings *right now* and
+    /// runs it. Nothing is cached: a key pasted or a model changed while
+    /// the recording was still running takes effect on this very
+    /// dictation.
+    ///
+    /// The `notConfigured` throw is a backstop, not the main gate —
+    /// `AppDelegate` refuses to start a proofreading recording at all
+    /// without a key and a model, so that the user finds out before
+    /// speaking rather than after. This covers the narrow case of a key
+    /// being cleared mid-recording.
+    private func proofread(_ text: String) async throws -> String {
+        let key = settings.openAIAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let model = settings.proofreadModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty, !model.isEmpty else { throw ProofreadError.notConfigured }
+
+        return try await proofreader.proofread(
+            ProofreadRequest(text: text, style: settings.proofreadStyle, model: model, apiKey: key)
+        )
+    }
+
+    /// Surfaces a problem that happened *before* any dictation could
+    /// start, so it reaches the overlay the same way every in-flight
+    /// failure already does. `AppDelegate` uses it for a proofreading
+    /// shortcut pressed with no OpenAI key saved: the alternative — start
+    /// recording, transcribe, then explain at the end — makes the user
+    /// speak a whole message to be told the feature was never set up.
+    ///
+    /// Guarded on `.idle` so it can never overwrite the explanation of a
+    /// failure that is actually in flight.
+    func reportProblem(_ message: String) {
+        guard state == .idle else { return }
+        problem = message
     }
 
     /// The single teardown path every exit from `.recording` — normal,
