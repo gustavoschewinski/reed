@@ -172,6 +172,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Opening Reed while it is already running — from Spotlight, the
+    /// Finder, or `open -a` — has to put a window on screen.
+    ///
+    /// Reed runs `.accessory` whenever no window is open, so there is no
+    /// Dock icon to click and no window to restore: without this, the
+    /// second launch is silently a no-op. Nothing appears, which reads as
+    /// the app not being installed at all rather than as "it's already
+    /// open, in the menu bar". The first launch shows nothing either, by
+    /// design — Reed is a background dictation agent — so opening it again
+    /// is the only gesture a user has for "show me this app", and it's the
+    /// one that has to answer.
+    ///
+    /// It routes the same way the launch above does: an unfinished
+    /// onboarding owns the screen until it's done, and both destinations
+    /// already handle being asked twice by bringing their existing window
+    /// forward.
+    func applicationShouldHandleReopen(
+        _ sender: NSApplication, hasVisibleWindows: Bool
+    ) -> Bool {
+        if settings.hasCompletedOnboarding {
+            openMainWindow()
+        } else {
+            showOnboardingWindow()
+        }
+        return true
+    }
+
     /// Item 1 (ship blocker): the one code path that runs on a normal Quit
     /// — one click from the menu bar, mid-recording, mutes the machine
     /// forever without it. `session.prepareForTermination()` unwinds every

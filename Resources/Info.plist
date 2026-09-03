@@ -11,7 +11,14 @@
     <key>CFBundleShortVersionString</key><string>0.1.0</string>
     <key>CFBundleVersion</key><string>1</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
-    <key>LSUIElement</key><true/>
+    <!-- Deliberately no LSUIElement. Reed runs with no Dock icon, but
+         `main.swift` already sets `.accessory` before `NSApplication.run()`
+         — earlier than a Dock icon could ever appear — so the key bought
+         nothing at runtime. What it did buy was a bundle marked as a
+         background agent, which LaunchServices hides from Spotlight and
+         Launchpad: the app became genuinely unopenable, since an agent has
+         no Dock icon to click either. `WindowPolicyTracker` still promotes
+         to `.regular` while a window is open and drops back after. -->
     <key>NSMicrophoneUsageDescription</key>
     <string>Reed listens to your microphone only while you're actively dictating, and transcribes it on this Mac.</string>
     <key>NSHighResolutionCapable</key><true/>

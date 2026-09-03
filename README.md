@@ -59,8 +59,11 @@ Requires Xcode 26.6+ and macOS 14+.
 swift build
 swift test
 ./Scripts/build-app.sh   # produces build/Reed.app
+./Scripts/install.sh     # builds, then installs to /Applications and launches
 ./Scripts/make-dmg.sh    # produces build/Reed.dmg
 ```
+
+Use `install.sh` for anything past a smoke test. `build-app.sh` leaves the app in `build/`, and running Reed from there means a second bundle with the same identifier competing with the installed one — it is easy to end up debugging a stale binary. `install.sh` also registers the app with LaunchServices and Spotlight, which a plain copy does not do: Reed has no Dock icon, so ⌘-Space is how you open it.
 
 `Scripts/make-icon.sh` regenerates `Resources/Reed.icns` from its vector source if you want to change it.
 
