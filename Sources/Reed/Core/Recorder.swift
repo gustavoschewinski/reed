@@ -128,23 +128,45 @@ enum RecorderError: Error {
     case deviceUnavailable
 }
 
-/// Whether a format `AVAudioInputNode.outputFormat(forBus:)` reports is
-/// something `AVAudioEngine.installTap` can actually be handed. A denied
-/// microphone permission — or simply no usable input device at the moment
-/// capture is requested — makes the input node report a degenerate format:
-/// zero sample rate, zero channels. `installTap` does not validate that
-/// itself; it raises an Objective-C exception ("required condition is
-/// false…") that surfaces in Swift as an uncatchable `SIGTRAP`, not a
-/// catchable `Error` — the crash this predicate exists to prevent.
+/// The two things that must hold before `AVAudioEngine.installTap` is
+/// handed a format. `installTap` validates neither itself: it raises an
+/// Objective-C exception ("required condition is false…") rather than
+/// returning an error, and those are what these predicates exist to
+/// prevent.
 ///
-/// Extracted as a pure, `Recorder`-independent predicate — unlike the rest
+/// Extracted as pure, `Recorder`-independent predicates — unlike the rest
 /// of `Recorder`, which opens real hardware and is verified by hand, not
-/// unit-tested by design — so this one guard can be tested without a
+/// unit-tested by design — so these guards can be tested without a
 /// microphone, the way `PendingDeletionController` and `WindowPolicyTracker`
 /// were pulled out of their owning types for the same reason.
 enum AudioFormatValidation {
+    /// Whether the format the input node reports is non-degenerate. A denied
+    /// microphone permission — or simply no usable input device at the moment
+    /// capture is requested — makes the input node report zero sample rate and
+    /// zero channels.
     static func isUsable(sampleRate: Double, channelCount: AVAudioChannelCount) -> Bool {
         sampleRate > 0 && channelCount > 0
+    }
+
+    /// Whether a tap format may be installed against a given input hardware
+    /// format. Mirrors the condition AVFAudio asserts internally:
+    ///
+    ///     required condition is false:
+    ///     [AVAudioEngineGraph.mm:InstallTapOnNode:
+    ///      (format.sampleRate == inputHWFormat.sampleRate)]
+    ///
+    /// This is not hypothetical. `Recorder.start()` used to read its tap
+    /// format from `inputNode.outputFormat(forBus: 0)`, which intermittently
+    /// reports the *output* device's sample rate rather than the
+    /// microphone's — on a Mac whose speakers run at 44.1 kHz and whose
+    /// microphone runs at 48 kHz, that mismatch raised the exception above
+    /// and, because AppKit catches it at the top of the run loop, left the
+    /// app running but permanently unable to record until relaunched.
+    /// `start()` now reads the hardware format directly, so the two agree by
+    /// construction; this guard is what makes that a checked invariant
+    /// rather than an assumption.
+    static func canInstallTap(tapSampleRate: Double, hardwareSampleRate: Double) -> Bool {
+        tapSampleRate > 0 && tapSampleRate == hardwareSampleRate
     }
 }
 
@@ -226,7 +248,20 @@ final class Recorder {
         // outputNode != nullptr") that Swift cannot catch.
         let input = engine.inputNode
         engine.prepare()
-        let inputFormat = input.outputFormat(forBus: 0)
+
+        // `inputFormat(forBus: 0)`, not `outputFormat(forBus: 0)`. They are
+        // usually the same value, but not always, and `installTap` accepts
+        // only one of them: it asserts `format.sampleRate ==
+        // inputHWFormat.sampleRate`, and `inputFormat` *is* that hardware
+        // format, while `outputFormat` is what the node reports downstream
+        // into the graph. On a Mac whose speakers run at 44.1 kHz and whose
+        // microphone runs at 48 kHz, `outputFormat` intermittently returned
+        // the speakers' rate — most often right after the start cue opened
+        // the output device a few milliseconds earlier — and the resulting
+        // exception left Reed running but unable to record until relaunched.
+        // Reading the hardware format is what makes the tap install agree
+        // with it by construction.
+        let inputFormat = input.inputFormat(forBus: 0)
         DebugLog.log(
             "Recorder.start() input format sampleRate=\(inputFormat.sampleRate) channels=\(inputFormat.channelCount)"
         )
@@ -241,6 +276,24 @@ final class Recorder {
         }
         self.resampler = resampler
         let buffer = self.buffer
+
+        // Re-read immediately before the install, not reused from above: the
+        // default input device can change between the two — a headset
+        // connecting, a call ending — and `installTap` compares the format it
+        // is handed against whatever the hardware format is *at that moment*.
+        // Refusing here costs the user one failed dictation with an
+        // explanation; letting the rates disagree costs them every dictation
+        // until they relaunch Reed.
+        let hardwareFormat = input.inputFormat(forBus: 0)
+        guard AudioFormatValidation.canInstallTap(
+            tapSampleRate: inputFormat.sampleRate, hardwareSampleRate: hardwareFormat.sampleRate
+        ) else {
+            DebugLog.log(
+                "Recorder.start() refused the tap: rate \(inputFormat.sampleRate) "
+                    + "disagrees with the hardware's \(hardwareFormat.sampleRate)")
+            self.resampler = nil
+            throw RecorderError.deviceUnavailable
+        }
 
         // `@Sendable` keeps the closure out of MainActor isolation: a plain
         // closure formed here inherits it, and the Swift 6 runtime then
