@@ -245,9 +245,12 @@ final class Recorder {
         // The input node must exist before `prepare()`: `AVAudioEngine`
         // creates it lazily on first access, and preparing an engine with
         // no nodes at all raises an NSException ("inputNode != nullptr ||
-        // outputNode != nullptr") that Swift cannot catch.
+        // outputNode != nullptr"). `ObjCException.catching` is what turns
+        // that — and every other AVFAudio raise below — into an `Error` the
+        // caller can act on, instead of something AppKit swallows at the top
+        // of the run loop while leaving the recording half-started.
         let input = engine.inputNode
-        engine.prepare()
+        try ObjCException.catching { engine.prepare() }
 
         // `inputFormat(forBus: 0)`, not `outputFormat(forBus: 0)`. They are
         // usually the same value, but not always, and `installTap` accepts
@@ -295,11 +298,16 @@ final class Recorder {
             throw RecorderError.deviceUnavailable
         }
 
+        // Built before the install rather than inline in it, so the
+        // `ObjCException.catching` block below holds nothing but the one
+        // framework call — see that header's note on keeping the block
+        // minimal.
+        //
         // `@Sendable` keeps the closure out of MainActor isolation: a plain
         // closure formed here inherits it, and the Swift 6 runtime then
         // SIGTRAPs (`dispatch_assert_queue_fail`) when AVFAudio invokes the
         // tap on its own realtime queue.
-        input.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { @Sendable [weak self] pcmBuffer, _ in
+        let tap: AVAudioNodeTapBlock = { @Sendable [weak self] pcmBuffer, _ in
             let samples: [Float]
             do {
                 samples = try resampler.append(pcmBuffer)
@@ -331,15 +339,61 @@ final class Recorder {
             }
         }
 
-        try engine.start()
+        do {
+            try ObjCException.catching {
+                input.installTap(onBus: 0, bufferSize: 4096, format: inputFormat, block: tap)
+            }
+        } catch {
+            // Reached only if the guard above was somehow not enough — a
+            // format the engine rejects for a reason other than its sample
+            // rate, say. Logged with the raise's own reason string, which
+            // names the condition that failed, then re-thrown as an ordinary
+            // recorder failure.
+            self.resampler = nil
+            NSLog("Reed: installing the audio tap raised: %@", String(describing: error))
+            DebugLog.log("Recorder.start() installTap raised: \(error)")
+            throw RecorderError.deviceUnavailable
+        }
+
+        // `AVAudioEngine.start()` reports most failures by throwing, but not
+        // all of them: a graph it cannot configure raises instead. Both have
+        // to reach the caller as an `Error`, so the Swift one is carried out
+        // of the block by hand — the block itself cannot throw.
+        var startFailure: Error?
+        do {
+            try ObjCException.catching {
+                do { try engine.start() } catch { startFailure = error }
+            }
+        } catch {
+            engine.inputNode.removeTap(onBus: 0)
+            self.resampler = nil
+            NSLog("Reed: starting the audio engine raised: %@", String(describing: error))
+            DebugLog.log("Recorder.start() engine.start() raised: \(error)")
+            throw RecorderError.deviceUnavailable
+        }
+        if let startFailure {
+            engine.inputNode.removeTap(onBus: 0)
+            self.resampler = nil
+            throw startFailure
+        }
         DebugLog.log("Recorder.start() engine started")
     }
 
     /// Stops capture and returns the complete recording.
     @discardableResult
     func stop() -> [Float] {
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
+        // Stopping has to be total: this is the one path that gives the
+        // microphone back, and `DictationSession.teardown()` runs it once
+        // and only once. A raise escaping from here would skip the resampler
+        // flush below and, upstream, the volume restore and media resume —
+        // so it is caught, logged, and stepped over.
+        do {
+            try ObjCException.catching { engine.inputNode.removeTap(onBus: 0) }
+            try ObjCException.catching { engine.stop() }
+        } catch {
+            NSLog("Reed: stopping the audio engine raised: %@", String(describing: error))
+            DebugLog.log("Recorder.stop() raised: \(error)")
+        }
 
         // `engine.stop()` has returned, so the render thread cannot be
         // mid-callback and the resampler is ours to drain: its filter is
