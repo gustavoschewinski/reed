@@ -266,6 +266,10 @@ private func makeSession(
     // Muting waits out the start cue in production. Tests default to no
     // wait; the ones that need the mute to *not* land pass a long value.
     startCueDuration: Duration = .zero,
+    // Far longer than any test's own transcription, so the stall watchdog
+    // stays out of the way of every test that isn't about it. The ones that
+    // are pass a few milliseconds.
+    resultTimeout: Duration = .seconds(120),
     cuePlayer: FakeCuePlayer? = nil,
     // Defaults to `.authorized` (not nil/"ask the real system") so every
     // test in this file that doesn't care about authorization gets a
@@ -311,6 +315,7 @@ private func makeSession(
         paste: paste ?? {},
         passInterval: passInterval,
         startCueDuration: startCueDuration,
+        resultTimeout: resultTimeout,
         playCue: cuePlayer.play,
         microphoneAuthorizationOverride: microphoneAuthorizationOverride,
         requestMicrophoneAccess: requestMicrophoneAccess
@@ -731,7 +736,12 @@ final class StateBox {
     session.begin()
     recorder.onSamples?([Float](repeating: 0.1, count: 20_000))
 
-    try await Task.sleep(for: .milliseconds(100))
+    // Waits for the pass to actually land rather than sleeping a fixed
+    // 100ms and hoping it did. The whole suite runs in parallel, and under
+    // that load a first pass could miss a fixed window — this test failed
+    // roughly half the time before, for timing reasons and never for the
+    // behaviour it is about.
+    #expect(await waitUntil { session.previewText == "live preview text" })
 
     // Checked before cancel() — which, correctly, clears previewText as
     // part of its own cleanup.
@@ -1466,4 +1476,140 @@ private func proofreadableSettings() -> Settings {
 @MainActor
 private func waitUntilIdle(_ session: DictationSession) async {
     _ = await waitUntil { session.state == DictationState.idle }
+}
+
+// MARK: - Getting out of `.transcribing` (the stall)
+//
+// Everything after `end()` used to be a one-way door. `toggle()` ignores
+// `.transcribing`, `.proofreading` and `.delivering` — deliberately, so a
+// late tap cannot kill a result that is about to land — and `cancel()` only
+// marked the result for discard without leaving the state. The state itself
+// was left only when `completeEnd()` got all the way through, and
+// `completeEnd()` begins by awaiting the pass loop, which cancelling does
+// not abort: a `transcribe` call already in flight runs to completion no
+// matter what. A slow one — the speech model still compiling on the Neural
+// Engine, say — left the pill on screen, the microphone open, the output
+// muted, and no gesture that could end any of it.
+
+/// A `transcribe` that never returns within the life of a test. Stands in
+/// for the model load that took a minute rather than a moment.
+private actor StalledTranscriber: Transcriber {
+    func prepare() async throws {}
+    func transcribe(_ samples: [Float], timeOffset: Double) async throws -> TranscriptionPass {
+        await uncancellableDelay(.seconds(10))
+        return TranscriptionPass(text: "far too late", words: [], confidence: 1.0)
+    }
+}
+
+@MainActor
+@Test func escapeDuringTranscribingReturnsToIdleWithoutWaitingForTheResult() async throws {
+    let transcriber = DelayedTranscriber(delay: .milliseconds(400))
+    let session = try makeSession(transcriber: transcriber)
+
+    session.begin()
+    let task = session.end()
+    #expect(session.state == .transcribing)
+
+    session.cancel()
+
+    // Synchronously, not after awaiting `task`: the whole point is that the
+    // user gets their app back the moment they press escape, rather than
+    // whenever the transcription happens to finish.
+    #expect(session.state == .idle)
+
+    await task?.value
+    #expect(session.state == .idle)
+}
+
+@MainActor
+@Test func escapeDuringTranscribingLetsANewRecordingStartRightAway() async throws {
+    let transcriber = DelayedTranscriber(delay: .milliseconds(400))
+    let session = try makeSession(transcriber: transcriber)
+
+    session.begin()
+    let task = session.end()
+    session.cancel()
+
+    session.begin()
+    #expect(session.state == .recording)
+
+    await task?.value
+}
+
+@MainActor
+@Test func aStalledTranscriptionTimesOutBackToIdleAndSaysSo() async throws {
+    let session = try makeSession(transcriber: StalledTranscriber(), resultTimeout: .milliseconds(50))
+
+    session.begin()
+    session.end()
+    #expect(session.state == .transcribing)
+
+    #expect(await waitUntil { session.state == .idle })
+    #expect(session.problem != nil)
+}
+
+@MainActor
+@Test func aStalledTranscriptionStillGivesBackTheMicrophoneAndTheVolume() async throws {
+    // The stall used to happen *before* `completeEnd()` reached its
+    // teardown, so the recorder stayed running and the output stayed muted
+    // for as long as it lasted. Timing out has to unwind both.
+    let volume = FakeVolumeControl()
+    let recorder = FakeRecorder()
+    let session = try makeSession(
+        volume: volume, recorder: recorder,
+        transcriber: StalledTranscriber(), resultTimeout: .milliseconds(50))
+
+    session.begin()
+    session.end()
+
+    #expect(await waitUntil { session.state == .idle })
+    #expect(recorder.stopCount == 1)
+    #expect(volume.restores == 1)
+    #expect(session.level == 0)
+}
+
+@MainActor
+@Test func aTimedOutTranscriptionDeliversNothingAndStoresNothingWhenItFinallyLands() async throws {
+    let store = try TranscriptStore(inMemory: true)
+    let clipboard = FakeClipboard()
+    clipboard.string = "untouched"
+    let transcriber = DelayedTranscriber(delay: .milliseconds(300), text: "arrived far too late")
+    let session = try makeSession(
+        store: store, transcriber: transcriber, clipboard: clipboard,
+        resultTimeout: .milliseconds(30))
+
+    session.begin()
+    let task = session.end()
+    #expect(await waitUntil { session.state == .idle })
+
+    await task?.value
+
+    #expect(store.all().isEmpty)
+    #expect(clipboard.string == "untouched")
+}
+
+@MainActor
+@Test func anAbandonedTranscriptionNeverTouchesTheRecordingThatReplacedIt() async throws {
+    // The hazard the generation counter exists for: once a run can be
+    // abandoned while its `completeEnd()` is still in flight, that orphan
+    // can outlive the state it was working on — and must not publish text
+    // into, or idle out, whatever the user started next.
+    let store = try TranscriptStore(inMemory: true)
+    let transcriber = DelayedTranscriber(delay: .milliseconds(200), text: "text from the abandoned run")
+    let session = try makeSession(store: store, transcriber: transcriber)
+
+    session.begin()
+    let abandoned = session.end()
+    session.cancel()
+
+    session.begin()
+    #expect(session.state == .recording)
+
+    await abandoned?.value
+
+    // Still recording, still empty: the orphan published nothing and ended
+    // nothing.
+    #expect(session.state == .recording)
+    #expect(session.previewText == "")
+    #expect(store.all().isEmpty)
 }
