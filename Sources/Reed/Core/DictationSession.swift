@@ -107,6 +107,8 @@ final class DictationSession: ObservableObject {
     /// silenced it outright, which is why the stop cue was audible and the
     /// start cue never was.
     private let startCueDuration: Duration
+    /// See the `resultTimeout` initializer parameter.
+    private let resultTimeout: Duration
     /// The pending delayed mute, so `teardown()` can cancel it when a
     /// recording ends inside that window.
     private var muteTask: Task<Void, Never>?
@@ -162,11 +164,28 @@ final class DictationSession: ObservableObject {
     /// media, restore volume — run exactly once no matter how many exit
     /// paths call it.
     private var teardownRan = true
-    /// Set by `cancel()` when it lands during `.transcribing` or
-    /// `.proofreading`. Checked once, right before `completeEnd()` would
-    /// deliver or store — not a new state, just a discard flag on the
-    /// result that's already in flight.
-    private var discardResult = false
+    /// Which dictation the session is currently on. Bumped by every
+    /// `startRecording()` and by every `abandon()`, and captured by
+    /// `completeEnd()` at entry: a run whose number no longer matches has
+    /// been abandoned, and must publish nothing, deliver nothing, store
+    /// nothing, and change no state.
+    ///
+    /// This replaces what used to be a single `discardResult` flag. A flag
+    /// could say "throw this result away", which was enough while the state
+    /// machine could only leave `.transcribing` by finishing; it cannot say
+    /// "and by the way a *different* dictation owns `state` and
+    /// `previewText` now", which is exactly what became possible once
+    /// escape and the stall watchdog were allowed to return to `.idle`
+    /// without waiting for the in-flight result.
+    private var runID = 0
+    /// The in-flight `completeEnd()`, if any. Held so a fresh
+    /// `startRecording()` can wait for it before letting a new pass loop
+    /// touch the transcriber actor — an abandoned run is still running, and
+    /// still holds calls out to that actor.
+    private var completionTask: Task<Void, Never>?
+    /// The watchdog armed by `end()`, cancelled the moment the run it
+    /// belongs to leaves the post-recording states by any other route.
+    private var stallTask: Task<Void, Never>?
     /// Whether this recording was started by the proofreading shortcut.
     /// Decided once, at `begin()`, and not re-read afterwards: a recording
     /// started with one shortcut and stopped with the other keeps the
@@ -192,6 +211,16 @@ final class DictationSession: ObservableObject {
         // fewer passes rather than piling them up.
         passInterval: Duration = .milliseconds(600),
         startCueDuration: Duration = .milliseconds(300),
+        // How long everything after the recording — transcribe, proofread,
+        // deliver — may take before the session gives up and returns to
+        // `.idle`. Generous on purpose: the batch pass over the whole
+        // recording costs about 10ms per second of audio, so even a long
+        // dictation is seconds, but a first call that has to wait out a
+        // cold model load can legitimately take tens of them. This is a
+        // backstop against a stall that would otherwise never end, not a
+        // performance budget — losing one dictation to it is bad, and being
+        // unable to dictate at all until Reed is relaunched is worse.
+        resultTimeout: Duration = .seconds(45),
         playCue: @escaping (DictationCue) -> Void = { cue in
             switch cue {
             case .start: Cues.start()
@@ -216,6 +245,7 @@ final class DictationSession: ObservableObject {
         self.paste = paste
         self.passInterval = passInterval
         self.startCueDuration = startCueDuration
+        self.resultTimeout = resultTimeout
         self.playCue = playCue
         self.microphoneAuthorizationOverride = microphoneAuthorizationOverride
         self.requestMicrophoneAccess = requestMicrophoneAccess
@@ -314,6 +344,13 @@ final class DictationSession: ObservableObject {
     private func startRecording() {
         guard state == .idle else { return }
 
+        // A new run: anything still in flight from the previous one — an
+        // abandoned `completeEnd()`, most of all — now belongs to a number
+        // that no longer matches, and can no longer publish into this one.
+        runID &+= 1
+        stallTask?.cancel()
+        stallTask = nil
+
         pendingSamples = []
         appendedSampleCount = 0
         previewText = ""
@@ -321,7 +358,6 @@ final class DictationSession: ObservableObject {
         hypothesisText = ""
         level = 0
         teardownRan = false
-        discardResult = false
         problem = nil
         recordingStartedAt = .now
 
@@ -393,13 +429,23 @@ final class DictationSession: ObservableObject {
         // flag; it doesn't abort a suspended call). Awaiting it here, before
         // ever calling `transcriber.begin()`, guarantees that reset — and
         // everything after it — never races a stale call still touching the
-        // actor. `completeEnd()` already awaits its own pass loop before
-        // touching the actor further, so the only carry-over case is a
-        // recording ended via `cancel()`, which does not await.
+        // actor.
+        //
+        // The abandoned `completeEnd()` is awaited for the same reason and
+        // is the more dangerous of the two: it calls `append` and `finish`
+        // on that same actor, so letting `begin()` reset the transcriber
+        // underneath it would interleave two recordings' audio. Its own
+        // `runID` guard stops it publishing anything, but only waiting stops
+        // it *transcribing* anything. If it is genuinely stuck, this
+        // recording's preview waits with it — and this recording's own
+        // watchdog is what ends that, rather than nothing at all, which is
+        // what used to end it.
         let previousLoop = passLoopTask
+        let previousCompletion = completionTask
         passLoopTask = Task { [weak self] in
             guard let self else { return }
             await previousLoop?.value
+            await previousCompletion?.value
             await self.transcriber.begin()
             await self.runPassLoop()
         }
@@ -418,32 +464,64 @@ final class DictationSession: ObservableObject {
     /// it — pressing escape during a slow `finish()` must not paste anyway.
     func cancel() {
         switch state {
-        case .recording:
-            passLoopTask?.cancel()
-            pendingSamples = []
-            previewText = ""
-            confirmedText = ""
-            hypothesisText = ""
-            // Cue before teardown (Item 4, same reasoning as `begin()`):
-            // played explicitly here, before the call that restores volume
-            // and resumes media, rather than via a `defer` whose ordering
-            // relative to these statements is easy to misread at a glance.
-            if settings.playSounds { playCue(.cancel) }
-            state = .idle
-            teardown()
-
-        case .transcribing, .proofreading:
-            // A proofread already in flight is not itself cancelled — the
-            // request is cheap and about to finish either way. What
-            // changes is that its result is thrown away rather than
-            // pasted, which is the whole meaning of escape here.
-            guard !discardResult else { return }
-            discardResult = true
-            if settings.playSounds { playCue(.cancel) }
+        case .recording, .transcribing, .proofreading:
+            // The same thing in both cases, which is the point: escape means
+            // "give me my app back", and it used to mean that only while
+            // recording. During `.transcribing` it merely marked the result
+            // for discard and left the state alone, so the pill stayed up and
+            // the shortcut stayed dead until the transcription finished —
+            // which, when the transcription was what had gone wrong, could be
+            // never. Whatever is in flight is not itself cancellable (an
+            // `await` on the transcriber actor, or the proofreading request,
+            // runs to completion regardless); abandoning it is.
+            abandon(explaining: nil)
 
         case .idle, .delivering:
+            // `.delivering` is the pasting itself, measured in milliseconds
+            // and already past the point where discarding would help.
             break
         }
+    }
+
+    /// Returns to `.idle` from anywhere, now, without waiting for whatever
+    /// is in flight — the single path both escape and the stall watchdog
+    /// take.
+    ///
+    /// Bumping `runID` is what makes this safe: the in-flight
+    /// `completeEnd()` keeps running (nothing here can stop it) but its
+    /// number no longer matches, so every mutation it would make is skipped
+    /// and its result is dropped.
+    ///
+    /// `explaining` is nil for a deliberate cancel — the user knows why the
+    /// pill went away — and carries a sentence when the watchdog fired,
+    /// where they do not.
+    private func abandon(explaining message: String?) {
+        DebugLog.log("DictationSession.abandon() from state=\(state), explained=\(message != nil)")
+        runID &+= 1
+        stallTask?.cancel()
+        stallTask = nil
+        passLoopTask?.cancel()
+        pendingSamples = []
+        previewText = ""
+        confirmedText = ""
+        hypothesisText = ""
+
+        // Cue before teardown (Item 4, same reasoning as `begin()`): played
+        // explicitly here, before the call that restores volume and resumes
+        // media, rather than via a `defer` whose ordering relative to these
+        // statements is easy to misread at a glance.
+        if settings.playSounds { playCue(.cancel) }
+
+        // Before `state`, not after: `teardown()` is what stops the
+        // recorder, restores the volume and resumes media, and `AppDelegate`
+        // observes `state` synchronously — so by the time anything reacts to
+        // `.idle`, the machine is already back the way it was found. Setting
+        // `problem` first, for the same reason: `state` and `problem` are
+        // observed together, and a nil-then-set `problem` would flash the
+        // overlay away and straight back.
+        teardown()
+        problem = message
+        state = .idle
     }
 
     /// `.holdEnd` (and `.tap` from recording, via `toggle()`): recording →
@@ -454,8 +532,55 @@ final class DictationSession: ObservableObject {
     func end() -> Task<Void, Never>? {
         guard state == .recording else { return nil }
         state = .transcribing
-        return Task { [weak self] in
-            await self?.completeEnd()
+        armStallWatchdog()
+
+        // Both captured here, synchronously, and handed to `completeEnd()`
+        // rather than read inside it. Between this line and that task's first
+        // instruction the user can abandon this run and start another one,
+        // and each of these would read as the *replacement* recording's:
+        //
+        // `run` is the whole basis of the gating in `completeEnd()`. Read
+        // there, it would be read after any abandonment that happened in the
+        // meantime, and so always match — a guard that can never fire.
+        //
+        // `loop` would by then name the new recording's pass loop, which this
+        // run must neither cancel nor wait for. Waiting for it deadlocks
+        // outright: that loop's own first act is to wait for this task.
+        let run = runID
+        let loop = passLoopTask
+        let task = Task<Void, Never> { [weak self] in
+            await self?.completeEnd(run: run, passLoop: loop)
+        }
+        completionTask = task
+        return task
+    }
+
+    /// The backstop for everything after the recording. `completeEnd()` is
+    /// a chain of awaits — the pass loop, the transcriber actor, the
+    /// proofreading request — and not one of them can be cancelled from
+    /// here: cancelling a `Task` sets a flag, it does not abort a call
+    /// already suspended inside an actor. So the only way to guarantee the
+    /// session comes back is to stop waiting for it.
+    ///
+    /// Fires against `runID`, not against `state`, so a watchdog left over
+    /// from a run that has already finished (or been abandoned) can never
+    /// end the one that replaced it.
+    private func armStallWatchdog() {
+        stallTask?.cancel()
+        let run = runID
+        let timeout = resultTimeout
+        stallTask = Task { [weak self] in
+            try? await Task.sleep(for: timeout)
+            guard !Task.isCancelled, let self, self.runID == run else { return }
+            switch self.state {
+            case .transcribing, .proofreading, .delivering:
+                NSLog("Reed: giving up on a dictation that never finished transcribing.")
+                self.abandon(
+                    explaining: "Reed took too long to finish that one and gave up. "
+                        + "The next dictation should work — try again.")
+            case .idle, .recording:
+                break
+            }
         }
     }
 
@@ -471,21 +596,55 @@ final class DictationSession: ObservableObject {
     /// silent and outlives the app.
     func prepareForTermination() {
         passLoopTask?.cancel()
+        stallTask?.cancel()
+        stallTask = nil
         teardown()
     }
 
     // MARK: - Recording lifecycle
 
-    private func completeEnd() async {
-        defer { teardown() }
+    /// `run` is the value `runID` had when `end()` was called — passed in
+    /// rather than read here, because this body first executes some time
+    /// after that, by which point the run may already have been abandoned
+    /// and replaced. Every mutation below is gated on it still being the
+    /// current one: escape and the stall watchdog both return the session to
+    /// `.idle` without being able to stop this call, so from here on "am I
+    /// still the dictation the user is waiting for?" has to be asked at
+    /// every suspension point rather than assumed.
+    private func completeEnd(run: Int, passLoop: Task<Void, Never>?) async {
+        var isCurrent: Bool { runID == run }
 
-        // Serialize with the pass loop: cancelling it only sets a flag, it
-        // does not abort a pass already in flight, so wait for it to
+        defer {
+            // However this run leaves — delivered, empty, thrown — it is no
+            // longer at risk of stalling, so the watchdog it armed has
+            // nothing left to guard. Skipped entirely by an abandoned run,
+            // whose watchdog and teardown belong to whatever replaced it.
+            if isCurrent {
+                stallTask?.cancel()
+                stallTask = nil
+                teardown()
+            }
+        }
+
+        // Serialize with this run's own pass loop: cancelling it only sets a
+        // flag, it does not abort a pass already in flight, so wait for it to
         // actually finish before touching the actor again. Otherwise
         // `transcriber.finish()` could run concurrently with a stale
         // `runPassIfDue()`, corrupting the agreement engine's bookkeeping.
-        passLoopTask?.cancel()
-        await passLoopTask?.value
+        passLoop?.cancel()
+        await passLoop?.value
+
+        // The first and widest of the gates. Everything below this line
+        // reads or writes state a *replacement* recording may already own:
+        // `pendingSamples` is its audio, `teardown()` would stop its
+        // recorder. An abandoned run has no business touching any of it, and
+        // nothing left to deliver either.
+        guard isCurrent else {
+            DebugLog.log(
+                "DictationSession.completeEnd() run \(run) was abandoned; "
+                    + "delivered=false stored=false")
+            return
+        }
         passLoopTask = nil
 
         // Stops the recorder (among other things) and hands back everything
@@ -510,6 +669,7 @@ final class DictationSession: ObservableObject {
         do {
             text = try await transcriber.finish()
         } catch {
+            guard isCurrent else { return }
             NSLog("Reed: transcription failed: %@", String(describing: error))
             // Covers both causes the review calls out together: the model
             // never finished loading (a genuine `prepare()` failure) and
@@ -527,15 +687,14 @@ final class DictationSession: ObservableObject {
 
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        // A deliberate cancel (Item 3) is not a failure — nothing to
-        // explain, so `problem` stays whatever `begin()` last reset it to.
-        guard !discardResult else {
-            previewText = ""
-            confirmedText = ""
-            hypothesisText = ""
-            state = .idle
+        // `finish()` is the longest wait before the network call below, and
+        // both escape and the watchdog can land inside it. `abandon()` has
+        // already cleared the preview and returned to `.idle` — there is
+        // nothing to undo here, only a result to drop.
+        guard isCurrent else {
             DebugLog.log(
-                "DictationSession.completeEnd() textLength=\(trimmed.count) delivered=false stored=false (discarded)")
+                "DictationSession.completeEnd() textLength=\(trimmed.count) "
+                    + "delivered=false stored=false (abandoned during transcription)")
             return
         }
 
@@ -578,16 +737,14 @@ final class DictationSession: ObservableObject {
 
             // Escape can land during the call, which is the longest
             // suspension in the whole pipeline — re-checked here rather
-            // than trusting the single check above, which happened before
-            // any of it.
-            guard !discardResult else {
-                previewText = ""
-                confirmedText = ""
-                hypothesisText = ""
-                state = .idle
+            // than trusting the check above, which happened before any of
+            // it. The request itself is not cancelled: it is cheap and about
+            // to finish either way, and what escape means here is that its
+            // answer is thrown away rather than pasted.
+            guard isCurrent else {
                 DebugLog.log(
                     "DictationSession.completeEnd() textLength=\(trimmed.count) "
-                        + "delivered=false stored=false (discarded during proofreading)")
+                        + "delivered=false stored=false (abandoned during proofreading)")
                 return
             }
         }
@@ -599,6 +756,26 @@ final class DictationSession: ObservableObject {
         // Item 2 can tell whether pasting actually happened.
         let effectiveCanPaste = canPaste ?? TextDelivery.accessibilityGranted
         await TextDelivery.deliver(outgoing, clipboard: clipboard, canPaste: effectiveCanPaste, paste: paste)
+
+        let duration = recordingStartedAt.map { Date().timeIntervalSince($0) } ?? 0
+        // What was actually pasted, not what was heard: History is the
+        // record of what Reed put into the other app, and a proofread
+        // message that can't be found there by the words it contains is
+        // not much of a record.
+        //
+        // Stored before the gate below, and so even by a run the watchdog
+        // gave up on while the paste itself was in flight: the text did
+        // reach the other app, and History would be lying if it left that
+        // out. What an abandoned run must not do is take the screen back.
+        store.add(text: outgoing, duration: duration)
+
+        guard isCurrent else {
+            DebugLog.log(
+                "DictationSession.completeEnd() textLength=\(outgoing.count) "
+                    + "delivered=\(effectiveCanPaste) stored=true (abandoned during delivery)")
+            return
+        }
+
         // A proofread that failed still delivered something — the raw
         // transcription — so its explanation is set first and then
         // deliberately overwritten by the Accessibility one when both
@@ -610,13 +787,6 @@ final class DictationSession: ObservableObject {
             problem = "Accessibility isn't granted, so that text was copied instead of typed in. "
                 + "Paste it with ⌘V, or open Settings to fix this for next time."
         }
-
-        let duration = recordingStartedAt.map { Date().timeIntervalSince($0) } ?? 0
-        // What was actually pasted, not what was heard: History is the
-        // record of what Reed put into the other app, and a proofread
-        // message that can't be found there by the words it contains is
-        // not much of a record.
-        store.add(text: outgoing, duration: duration)
 
         if settings.playSounds { playCue(.stop) }
 

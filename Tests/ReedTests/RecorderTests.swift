@@ -115,3 +115,34 @@ private func chunkedResample(chunkFrames: AVAudioFrameCount) throws -> [Float] {
     let worst = (0..<common).map { abs(small[$0] - large[$0]) }.max() ?? 0
     #expect(worst < 0.02)
 }
+
+// MARK: - The tap/hardware sample-rate agreement
+//
+// The exact condition AVFAudio asserts inside `installTap`:
+//
+//     required condition is false:
+//     [AVAudioEngineGraph.mm:2031:InstallTapOnNode:
+//      (format.sampleRate == inputHWFormat.sampleRate)]
+//
+// It raises an Objective-C exception, not a Swift error, so no `catch`
+// upstream can see it — which is why `Recorder.start()` has to refuse the
+// install itself rather than find out afterwards. Reproduced from the real
+// failure: this Mac's microphone runs at 48 kHz and its speakers at
+// 44.1 kHz, and `outputFormat(forBus:)` intermittently reported the
+// speakers' rate for the input node.
+
+@Test func matchingRatesCanInstallATap() {
+    #expect(AudioFormatValidation.canInstallTap(tapSampleRate: 48_000, hardwareSampleRate: 48_000))
+}
+
+@Test func theSpeakerRateAgainstTheMicrophoneRateCannotInstallATap() {
+    // The observed crash, exactly: 44.1 kHz output rate read for a 48 kHz mic.
+    #expect(!AudioFormatValidation.canInstallTap(tapSampleRate: 44_100, hardwareSampleRate: 48_000))
+}
+
+@Test func aDegenerateHardwareRateCannotInstallATapEvenIfBothAgree() {
+    // Two zeroes "match", but a zero-rate format is exactly the degenerate
+    // input `isUsable` already exists to refuse — agreement must not be a
+    // way around it.
+    #expect(!AudioFormatValidation.canInstallTap(tapSampleRate: 0, hardwareSampleRate: 0))
+}

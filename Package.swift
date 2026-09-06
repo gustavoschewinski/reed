@@ -9,9 +9,18 @@ let package = Package(
         .package(url: "https://github.com/sindresorhus/KeyboardShortcuts", from: "2.0.0"),
     ],
     targets: [
+        // The one thing Swift cannot do for itself: run a block and survive
+        // an Objective-C `NSException` raised inside it. AVFAudio reports
+        // several failures that way, and a Swift `catch` cannot see them.
+        // See `Sources/ReedObjC/include/ReedObjCException.h`.
+        .target(
+            name: "ReedObjC",
+            path: "Sources/ReedObjC"
+        ),
         .executableTarget(
             name: "Reed",
             dependencies: [
+                "ReedObjC",
                 .product(name: "FluidAudio", package: "FluidAudio"),
                 .product(name: "KeyboardShortcuts", package: "KeyboardShortcuts"),
             ],

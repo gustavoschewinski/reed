@@ -128,23 +128,45 @@ enum RecorderError: Error {
     case deviceUnavailable
 }
 
-/// Whether a format `AVAudioInputNode.outputFormat(forBus:)` reports is
-/// something `AVAudioEngine.installTap` can actually be handed. A denied
-/// microphone permission — or simply no usable input device at the moment
-/// capture is requested — makes the input node report a degenerate format:
-/// zero sample rate, zero channels. `installTap` does not validate that
-/// itself; it raises an Objective-C exception ("required condition is
-/// false…") that surfaces in Swift as an uncatchable `SIGTRAP`, not a
-/// catchable `Error` — the crash this predicate exists to prevent.
+/// The two things that must hold before `AVAudioEngine.installTap` is
+/// handed a format. `installTap` validates neither itself: it raises an
+/// Objective-C exception ("required condition is false…") rather than
+/// returning an error, and those are what these predicates exist to
+/// prevent.
 ///
-/// Extracted as a pure, `Recorder`-independent predicate — unlike the rest
+/// Extracted as pure, `Recorder`-independent predicates — unlike the rest
 /// of `Recorder`, which opens real hardware and is verified by hand, not
-/// unit-tested by design — so this one guard can be tested without a
+/// unit-tested by design — so these guards can be tested without a
 /// microphone, the way `PendingDeletionController` and `WindowPolicyTracker`
 /// were pulled out of their owning types for the same reason.
 enum AudioFormatValidation {
+    /// Whether the format the input node reports is non-degenerate. A denied
+    /// microphone permission — or simply no usable input device at the moment
+    /// capture is requested — makes the input node report zero sample rate and
+    /// zero channels.
     static func isUsable(sampleRate: Double, channelCount: AVAudioChannelCount) -> Bool {
         sampleRate > 0 && channelCount > 0
+    }
+
+    /// Whether a tap format may be installed against a given input hardware
+    /// format. Mirrors the condition AVFAudio asserts internally:
+    ///
+    ///     required condition is false:
+    ///     [AVAudioEngineGraph.mm:InstallTapOnNode:
+    ///      (format.sampleRate == inputHWFormat.sampleRate)]
+    ///
+    /// This is not hypothetical. `Recorder.start()` used to read its tap
+    /// format from `inputNode.outputFormat(forBus: 0)`, which intermittently
+    /// reports the *output* device's sample rate rather than the
+    /// microphone's — on a Mac whose speakers run at 44.1 kHz and whose
+    /// microphone runs at 48 kHz, that mismatch raised the exception above
+    /// and, because AppKit catches it at the top of the run loop, left the
+    /// app running but permanently unable to record until relaunched.
+    /// `start()` now reads the hardware format directly, so the two agree by
+    /// construction; this guard is what makes that a checked invariant
+    /// rather than an assumption.
+    static func canInstallTap(tapSampleRate: Double, hardwareSampleRate: Double) -> Bool {
+        tapSampleRate > 0 && tapSampleRate == hardwareSampleRate
     }
 }
 
@@ -223,10 +245,26 @@ final class Recorder {
         // The input node must exist before `prepare()`: `AVAudioEngine`
         // creates it lazily on first access, and preparing an engine with
         // no nodes at all raises an NSException ("inputNode != nullptr ||
-        // outputNode != nullptr") that Swift cannot catch.
+        // outputNode != nullptr"). `ObjCException.catching` is what turns
+        // that — and every other AVFAudio raise below — into an `Error` the
+        // caller can act on, instead of something AppKit swallows at the top
+        // of the run loop while leaving the recording half-started.
         let input = engine.inputNode
-        engine.prepare()
-        let inputFormat = input.outputFormat(forBus: 0)
+        try ObjCException.catching { engine.prepare() }
+
+        // `inputFormat(forBus: 0)`, not `outputFormat(forBus: 0)`. They are
+        // usually the same value, but not always, and `installTap` accepts
+        // only one of them: it asserts `format.sampleRate ==
+        // inputHWFormat.sampleRate`, and `inputFormat` *is* that hardware
+        // format, while `outputFormat` is what the node reports downstream
+        // into the graph. On a Mac whose speakers run at 44.1 kHz and whose
+        // microphone runs at 48 kHz, `outputFormat` intermittently returned
+        // the speakers' rate — most often right after the start cue opened
+        // the output device a few milliseconds earlier — and the resulting
+        // exception left Reed running but unable to record until relaunched.
+        // Reading the hardware format is what makes the tap install agree
+        // with it by construction.
+        let inputFormat = input.inputFormat(forBus: 0)
         DebugLog.log(
             "Recorder.start() input format sampleRate=\(inputFormat.sampleRate) channels=\(inputFormat.channelCount)"
         )
@@ -242,11 +280,34 @@ final class Recorder {
         self.resampler = resampler
         let buffer = self.buffer
 
+        // Re-read immediately before the install, not reused from above: the
+        // default input device can change between the two — a headset
+        // connecting, a call ending — and `installTap` compares the format it
+        // is handed against whatever the hardware format is *at that moment*.
+        // Refusing here costs the user one failed dictation with an
+        // explanation; letting the rates disagree costs them every dictation
+        // until they relaunch Reed.
+        let hardwareFormat = input.inputFormat(forBus: 0)
+        guard AudioFormatValidation.canInstallTap(
+            tapSampleRate: inputFormat.sampleRate, hardwareSampleRate: hardwareFormat.sampleRate
+        ) else {
+            DebugLog.log(
+                "Recorder.start() refused the tap: rate \(inputFormat.sampleRate) "
+                    + "disagrees with the hardware's \(hardwareFormat.sampleRate)")
+            self.resampler = nil
+            throw RecorderError.deviceUnavailable
+        }
+
+        // Built before the install rather than inline in it, so the
+        // `ObjCException.catching` block below holds nothing but the one
+        // framework call — see that header's note on keeping the block
+        // minimal.
+        //
         // `@Sendable` keeps the closure out of MainActor isolation: a plain
         // closure formed here inherits it, and the Swift 6 runtime then
         // SIGTRAPs (`dispatch_assert_queue_fail`) when AVFAudio invokes the
         // tap on its own realtime queue.
-        input.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { @Sendable [weak self] pcmBuffer, _ in
+        let tap: AVAudioNodeTapBlock = { @Sendable [weak self] pcmBuffer, _ in
             let samples: [Float]
             do {
                 samples = try resampler.append(pcmBuffer)
@@ -278,15 +339,61 @@ final class Recorder {
             }
         }
 
-        try engine.start()
+        do {
+            try ObjCException.catching {
+                input.installTap(onBus: 0, bufferSize: 4096, format: inputFormat, block: tap)
+            }
+        } catch {
+            // Reached only if the guard above was somehow not enough — a
+            // format the engine rejects for a reason other than its sample
+            // rate, say. Logged with the raise's own reason string, which
+            // names the condition that failed, then re-thrown as an ordinary
+            // recorder failure.
+            self.resampler = nil
+            NSLog("Reed: installing the audio tap raised: %@", String(describing: error))
+            DebugLog.log("Recorder.start() installTap raised: \(error)")
+            throw RecorderError.deviceUnavailable
+        }
+
+        // `AVAudioEngine.start()` reports most failures by throwing, but not
+        // all of them: a graph it cannot configure raises instead. Both have
+        // to reach the caller as an `Error`, so the Swift one is carried out
+        // of the block by hand — the block itself cannot throw.
+        var startFailure: Error?
+        do {
+            try ObjCException.catching {
+                do { try engine.start() } catch { startFailure = error }
+            }
+        } catch {
+            engine.inputNode.removeTap(onBus: 0)
+            self.resampler = nil
+            NSLog("Reed: starting the audio engine raised: %@", String(describing: error))
+            DebugLog.log("Recorder.start() engine.start() raised: \(error)")
+            throw RecorderError.deviceUnavailable
+        }
+        if let startFailure {
+            engine.inputNode.removeTap(onBus: 0)
+            self.resampler = nil
+            throw startFailure
+        }
         DebugLog.log("Recorder.start() engine started")
     }
 
     /// Stops capture and returns the complete recording.
     @discardableResult
     func stop() -> [Float] {
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
+        // Stopping has to be total: this is the one path that gives the
+        // microphone back, and `DictationSession.teardown()` runs it once
+        // and only once. A raise escaping from here would skip the resampler
+        // flush below and, upstream, the volume restore and media resume —
+        // so it is caught, logged, and stepped over.
+        do {
+            try ObjCException.catching { engine.inputNode.removeTap(onBus: 0) }
+            try ObjCException.catching { engine.stop() }
+        } catch {
+            NSLog("Reed: stopping the audio engine raised: %@", String(describing: error))
+            DebugLog.log("Recorder.stop() raised: \(error)")
+        }
 
         // `engine.stop()` has returned, so the render thread cannot be
         // mid-callback and the resampler is ours to drain: its filter is
