@@ -1,8 +1,7 @@
 import SwiftUI
 
-/// Design tokens for Reed's UI: the overlay (Task 12) is the first consumer,
-/// but the main window and onboarding (Tasks 13, 14) share these same values
-/// rather than each picking their own.
+/// Design tokens for Reed's UI. The overlay, the main window and onboarding
+/// all read from here rather than each picking their own values.
 ///
 /// The overlay is an instrument readout, not a page — something glanced at
 /// dozens of times a day and trusted, not admired. The boldness budget here
@@ -54,7 +53,7 @@ enum Theme {
     /// state changes apply straight away instead.
     // MARK: - Window (light/dark)
 
-    /// Tokens for the main window (Dashboard/History/Settings, Task 13+).
+    /// Tokens for the main window (Dashboard, History, Settings).
     ///
     /// The overlay above is fixed dark on purpose — it floats over whatever
     /// the user was already doing, so it stays legible and consistent no

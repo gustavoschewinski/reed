@@ -62,7 +62,7 @@ struct TranscriptionPass: Sendable {
 }
 
 /// Mirrors FluidAudio's `DownloadProgress`/`DownloadPhase` — same reasoning
-/// as `TokenSpan` above: `OnboardingModel` (Task 14) and its tests report and
+/// as `TokenSpan` above: `OnboardingModel` and its tests report and
 /// assert on this instead of the library's own type, so they never need to
 /// import FluidAudio or link CoreML.
 ///
@@ -127,7 +127,7 @@ actor ParakeetTranscriber: Transcriber {
     }
 
     /// Same as `prepare()`, but reports progress for onboarding's model
-    /// screen (`OnboardingModel`, Task 14). `progressHandler` is FluidAudio's
+    /// screen (`OnboardingModel`). `progressHandler` is FluidAudio's
     /// own — called on an unspecified queue, not this actor and not the main
     /// actor — so a caller that touches UI state must hop back itself;
     /// `OnboardingModel` does exactly that.

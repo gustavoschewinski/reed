@@ -12,14 +12,18 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          # build-app.sh derives CFBundleVersion from the commit count.
+          fetch-depth: 0
 
       - name: Run tests
         run: swift test
 
-      - name: Build app
-        run: ./Scripts/build-app.sh
-
       - name: Build DMG
+        env:
+          # The tag is the version of record; build-app.sh stamps it into
+          # the bundle so the plist never has to be edited per release.
+          REED_VERSION: ${{ github.ref_name }}
         run: ./Scripts/make-dmg.sh
 
       - name: Create GitHub release

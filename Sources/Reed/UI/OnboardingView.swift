@@ -2,7 +2,7 @@ import AppKit
 import KeyboardShortcuts
 import SwiftUI
 
-/// Reed's first-run flow (Task 14): permissions, then the one-time model
+/// Reed's first-run flow: permissions, then the one-time model
 /// download, then the hotkey — in that order, on purpose. The model has to
 /// be ready before the hotkey step even appears, which is what keeps
 /// recording impossible until it actually is (see `OnboardingModel`'s doc
@@ -95,7 +95,7 @@ private struct PermissionsStepView: View {
                 // directly, every tap, guaranteeing a working route out
                 // regardless of the alert's state. Without this, a user who
                 // dismisses the one-time alert without reading it has no
-                // way back in — see the Task 14 fix-round-1 report.
+                // way back in.
                 PermissionRow(
                     symbol: "keyboard",
                     title: "Accessibility",

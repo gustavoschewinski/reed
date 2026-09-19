@@ -31,10 +31,10 @@ enum OnboardingStep: Int, CaseIterable, Sendable {
     case hotkey
 }
 
-/// Drives Reed's three first-run screens (Task 14): live permission state,
+/// Drives Reed's three first-run screens: live permission state,
 /// the one-time model download/compile, and the hotkey step that ends
 /// onboarding. Extracted out of `OnboardingView` — the same reasoning as
-/// `PendingDeletionController` in Task 13 — so the step gating and the
+/// `PendingDeletionController` — so the step gating and the
 /// model-readiness state machine can be unit tested without ever touching
 /// AVFoundation, the Accessibility API, or FluidAudio/CoreML: every system
 /// call is injected as a closure, and nothing in `OnboardingModelTests.swift`
