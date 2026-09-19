@@ -32,7 +32,7 @@ final class MainWindowState: ObservableObject {
     @Published var selectedTab: MainTab = .dashboard
 }
 
-/// Root content of the main window (Task 13): Dashboard, History, and
+/// Root content of the main window: Dashboard, History, and
 /// Settings behind a sidebar. Unlike the overlay, this follows the system
 /// light/dark appearance — see `Theme.Window`.
 ///

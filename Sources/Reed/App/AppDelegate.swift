@@ -8,7 +8,7 @@ import SwiftUI
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
 
-    /// Shared with the main window (Task 13), which is why these two are
+    /// Shared with the main window, which is why these two are
     /// now separate stored properties rather than only living inside
     /// `session` — `MainWindowView` needs the same `Settings` and
     /// `TranscriptStore` instances `DictationSession` writes to, not copies.
@@ -53,13 +53,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// remains the fallback it always was.
     private var escapeMonitor: Any?
 
-    /// The Dashboard/History/Settings window (Task 13). Created lazily on
+    /// The Dashboard/History/Settings window. Created lazily on
     /// first open and reused after that — `nil` only ever means "never
     /// opened this launch", not "closed".
     private var mainWindow: NSWindow?
     private let mainWindowState = MainWindowState()
 
-    /// First-run onboarding (Task 14). Created lazily, reused while
+    /// First-run onboarding. Created lazily, reused while
     /// showing, and cleared once it finishes — `nil` means either "never
     /// shown this launch" or "already completed", both of which are
     /// indistinguishable to anything that only wants to bring it forward.
@@ -491,7 +491,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Onboarding
 
-    /// Shows the first-run window (Task 14), or just brings it forward if
+    /// Shows the first-run window, or just brings it forward if
     /// it's already open. Every system call `OnboardingModel` needs is
     /// wired up here — this is the one place that actually touches
     /// AVFoundation's microphone API, `TextDelivery`'s Accessibility calls,
@@ -622,7 +622,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 String(describing: error))
             // An in-memory `ModelContainer` has nothing on disk that could
             // make its own init throw for the same reason, so this is safe.
-            // swiftlint:disable:next force_try
             return try! TranscriptStore(inMemory: true)
         }
     }
