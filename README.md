@@ -4,7 +4,7 @@
 
 # Reed
 
-**Hold a shortcut, talk, and the words show up wherever you're typing.**
+**Hold a shortcut, talk, and the words show up wherever you're typing.**<br>
 All on your Mac. Nothing leaves it.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-black.svg)](LICENSE)
@@ -16,9 +16,9 @@ All on your Mac. Nothing leaves it.
 
 ---
 
-🎙️ **On-device dictation.** 25 languages, auto-detected. ~23× real time on an M3.
-✍️ **Optional proofreading.** A second shortcut that fixes the typos before pasting.
-🔒 **Private by default.** Audio is never written to disk and never sent anywhere.
+- 🎙️ **On-device dictation.** 25 languages, auto-detected. ~23× real time on an M3.
+- ✍️ **Optional proofreading.** A second shortcut that fixes the typos before pasting.
+- 🔒 **Private by default.** Audio is never written to disk and never sent anywhere.
 
 ## Install
 
