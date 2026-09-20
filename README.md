@@ -24,9 +24,6 @@ All on your Mac. Nothing leaves it.
 
 Grab the DMG from [**Releases**](https://github.com/gustavoschewinski/reed/releases), open it, drag Reed to Applications. Apple silicon, macOS 14+.
 
-> [!IMPORTANT]
-> Reed isn't notarized yet, so the first launch needs one extra click. macOS will say it can't verify the developer. Right-click Reed in Applications and choose **Open**, or go to System Settings → Privacy & Security and click **Open Anyway**. Once, and never again.
-
 A Homebrew cask lives in [`Casks/reed.rb`](Casks/reed.rb), but the tap isn't published yet, so use the DMG for now.
 
 ## First run
