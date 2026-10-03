@@ -85,7 +85,7 @@ public struct MeetingLibrary: Sendable {
     /// Only plain file names inside `directory`; anything that could walk
     /// out of it (`..`, `/`) is refused before touching the disk.
     private func url(for id: String) -> URL? {
-        guard !id.isEmpty, !id.contains("/"), !id.contains(".."), !id.hasPrefix(".") else { return nil }
+        guard !id.isEmpty, !id.contains("/"), id != "..", !id.hasPrefix(".") else { return nil }
         return directory.appendingPathComponent("\(id).md")
     }
 

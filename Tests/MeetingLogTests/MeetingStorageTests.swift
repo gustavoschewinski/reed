@@ -56,13 +56,21 @@ private func line(_ offset: TimeInterval, _ text: String) -> MeetingLine {
 }
 
 @Test func libraryRejectsIdsThatEscapeTheDirectory() throws {
-    let dir = tempDir()
+    // Create a parent temp dir with meetings as a subdirectory
+    let parentDir = FileManager.default.temporaryDirectory.appendingPathComponent("reed-traversal-\(UUID().uuidString)")
+    let dir = parentDir.appendingPathComponent("meetings")
     try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-    try "secret".write(to: dir.deletingLastPathComponent().appendingPathComponent("outside.md"), atomically: true, encoding: .utf8)
+
+    // Create a VALID meeting file in the parent directory (outside the meetings folder)
+    let outsideHeader = header(0, length: 10, app: "Outside")
+    let outsideContent = MeetingFormat(timeZone: utc).render(outsideHeader, lines: [line(0, "secret")])
+    try outsideContent.write(to: parentDir.appendingPathComponent("outside.md"), atomically: true, encoding: .utf8)
+
     let library = MeetingLibrary(directory: dir)
     #expect(library.transcript(id: "../outside") == nil)
     #expect(library.transcript(id: "a/b") == nil)
     #expect(library.transcript(id: "") == nil)
+    #expect(library.transcript(id: "..") == nil)
 }
 
 @Test func libraryIgnoresFilesThatAreNotMeetings() throws {
@@ -71,10 +79,17 @@ private func line(_ offset: TimeInterval, _ text: String) -> MeetingLine {
     try "garbage".write(to: dir.appendingPathComponent("notes.md"), atomically: true, encoding: .utf8)
     try Data([0xFF, 0xFE]).write(to: dir.appendingPathComponent("binary.md"))
     try "x".write(to: dir.appendingPathComponent(".DS_Store"), atomically: true, encoding: .utf8)
+
+    // Create a VALID meeting file with leading dot (should be ignored by all() and transcript())
+    let hiddenHeader = header(0, length: 60, app: "Hidden")
+    let hiddenContent = MeetingFormat(timeZone: utc).render(hiddenHeader, lines: [line(0, "secret")])
+    try hiddenContent.write(to: dir.appendingPathComponent(".hidden.md"), atomically: true, encoding: .utf8)
+
     let library = MeetingLibrary(directory: dir)
     #expect(library.list(since: nil, until: nil).isEmpty)
     #expect(library.search("garbage", since: nil, limit: 10).isEmpty)
     #expect(library.purge(endedBefore: .distantFuture) == 0)
+    #expect(library.transcript(id: ".hidden") == nil)
 }
 
 @Test func searchIsCaseAndAccentInsensitive() throws {
@@ -84,6 +99,21 @@ private func line(_ offset: TimeInterval, _ text: String) -> MeetingLine {
     let hits = MeetingLibrary(directory: dir).search("DEPLOY AMANHA", since: nil, limit: 10)
     #expect(hits.count == 1)
     #expect(hits.first?.line.contains("Deploy amanhã") == true)
+}
+
+@Test func doubleDotFilenamesAreReadableAndListable() throws {
+    let dir = tempDir()
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+    // Create a valid meeting file with double-dots in the name
+    let header = MeetingHeader(started: t0, ended: t0.addingTimeInterval(60), source: MeetingSource(app: "Test"), mode: .auto)
+    let content = MeetingFormat(timeZone: utc).render(header, lines: [line(0, "version check")])
+    try content.write(to: dir.appendingPathComponent("notes..v2.md"), atomically: true, encoding: .utf8)
+
+    let library = MeetingLibrary(directory: dir)
+    #expect(library.list(since: nil, until: nil).count == 1)
+    #expect(library.transcript(id: "notes..v2") != nil)
+    #expect(library.transcript(id: "notes..v2")?.contains("version check") == true)
 }
 
 @Test func purgeDeletesOnlyOldMeetings() throws {

@@ -41,7 +41,7 @@ public final class MeetingWriter {
 
     private func prepareDirectory() throws {
         let fm = FileManager.default
-        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        try fm.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
     }
 
