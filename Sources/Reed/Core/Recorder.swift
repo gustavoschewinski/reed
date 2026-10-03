@@ -208,6 +208,18 @@ final class Recorder {
 
     private let engine = AVAudioEngine()
     private let buffer = SampleBuffer()
+    /// Dictation needs the whole recording back from `stop()`; meeting
+    /// capture streams for hours and must not accumulate it.
+    private let keepsRecording: Bool
+    /// Echo cancellation for meeting capture without headphones: removes
+    /// what the speakers play from the mic signal, so the other side of a
+    /// call isn't transcribed twice. Off for dictation.
+    private let voiceProcessing: Bool
+
+    init(keepsRecording: Bool = true, voiceProcessing: Bool = false) {
+        self.keepsRecording = keepsRecording
+        self.voiceProcessing = voiceProcessing
+    }
     /// Lives for one recording: created in `start()` against the input
     /// format the microphone actually negotiated, drained in `stop()`.
     private var resampler: StreamingResampler?
@@ -250,6 +262,13 @@ final class Recorder {
         // caller can act on, instead of something AppKit swallows at the top
         // of the run loop while leaving the recording half-started.
         let input = engine.inputNode
+        if voiceProcessing {
+            try input.setVoiceProcessingEnabled(true)
+            // Default ducking lowers every other app while the mic is open —
+            // exactly wrong during a call the user is listening to.
+            input.voiceProcessingOtherAudioDuckingConfiguration =
+                AVAudioVoiceProcessingOtherAudioDuckingConfiguration(enableAdvancedDucking: false, duckingLevel: .min)
+        }
         try ObjCException.catching { engine.prepare() }
 
         // `inputFormat(forBus: 0)`, not `outputFormat(forBus: 0)`. They are
@@ -279,6 +298,7 @@ final class Recorder {
         }
         self.resampler = resampler
         let buffer = self.buffer
+        let keepsRecording = self.keepsRecording
 
         // Re-read immediately before the install, not reused from above: the
         // default input device can change between the two — a headset
@@ -323,7 +343,7 @@ final class Recorder {
             // returns. Once `stop()`'s `engine.stop()` call returns, the render thread
             // cannot be mid-callback, so no further appends are possible and `drain()`
             // is guaranteed to see every sample.
-            buffer.append(samples)
+            if keepsRecording { buffer.append(samples) }
 
             let level = AudioMath.rms(samples)
             // DispatchQueue.main.async is FIFO by contract, unlike separately-created

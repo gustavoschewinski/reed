@@ -21,6 +21,8 @@
          to `.regular` while a window is open and drops back after. -->
     <key>NSMicrophoneUsageDescription</key>
     <string>Reed listens to your microphone only while you're actively dictating, and transcribes it on this Mac.</string>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>In meeting mode, Reed transcribes what your Mac plays (the other side of a call, a video) on this Mac. The audio is never saved.</string>
     <key>NSHighResolutionCapable</key><true/>
 </dict>
 </plist>
