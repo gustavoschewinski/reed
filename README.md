@@ -29,11 +29,11 @@ A Homebrew cask lives in [`Casks/reed.rb`](Casks/reed.rb), but the tap isn't pub
 
 ## First run
 
-Reed asks for two permissions, downloads its speech models (~600 MB, with a real progress bar), and compiles the main one for the Neural Engine (about 20 seconds, once). Then you pick a shortcut and you're dictating. None of it repeats on later launches.
+Reed asks for two permissions (Microphone and Accessibility), downloads its speech models (~600 MB, with a real progress bar), and compiles the main one for the Neural Engine (about 20 seconds, once). Then you pick a shortcut and you're dictating. None of it repeats on later launches. A third, System Audio Recording, is asked for only when meeting mode first captures your Mac's audio.
 
 | Permission | Why |
 | --- | --- |
-| 🎤 **Microphone** | To hear you. Audio is captured only while you're actively dictating. |
+| 🎤 **Microphone** | To hear you. Audio is captured only while you're dictating, or while meeting mode is recording. |
 | ⌨️ **Accessibility** | So Reed can paste into the app you're in, instead of leaving the text on the clipboard. |
 | 🔊 **System Audio Recording** | Only for meeting mode, to hear the other side of a call. |
 
