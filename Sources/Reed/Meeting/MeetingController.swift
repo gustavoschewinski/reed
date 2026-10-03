@@ -80,6 +80,7 @@ final class MeetingController: ObservableObject {
     private var retiredSources: [ObjectIdentifier: MeetingSource] = [:]
     private var lastPlaying: Date?
     private var lastLoggedPlan: CapturePlan?
+    private var lastOutput: MeetingSource?
     private var watchdog = SilenceWatchdog()
     private var tapRetryAfter = Date.distantPast
     private var micRetryAfter = Date.distantPast
@@ -232,7 +233,14 @@ final class MeetingController: ObservableObject {
                 AudioProcesses.current(), ownPID: getpid(),
                 appName: AppInfo.name(bundleID:), windowTitle: AppInfo.focusedWindowTitle(bundleID:),
                 isUserApp: AppInfo.isUserApp(bundleID:))
-            if sources.output != nil { lastPlaying = now }
+            if let output = sources.output {
+                lastPlaying = now
+                lastOutput = output
+            } else if isPlaying(now) {
+                // The tap outlives the app's output by the debounce window;
+                // keep labelling what it hears with the app that played it.
+                sources.output = lastOutput
+            }
         } else {
             // Nobody asked for meeting mode: skip the Core Audio and
             // Accessibility queries entirely. `sources` is reset only after

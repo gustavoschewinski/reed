@@ -41,6 +41,14 @@ enum SourceResolver {
         return id
     }
 
+    /// App names as macOS reports them can carry invisible formatting
+    /// characters (WhatsApp's starts with U+200E), which would end up in
+    /// file names and transcripts.
+    static func displayName(_ raw: String) -> String {
+        let visible = raw.unicodeScalars.filter { $0.properties.generalCategory != .format }
+        return String(String.UnicodeScalarView(visible)).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     static func meetingTitle(_ title: String) -> String? {
         let lower = title.lowercased()
         return meetingTitleMarkers.contains(where: lower.contains) ? title : nil

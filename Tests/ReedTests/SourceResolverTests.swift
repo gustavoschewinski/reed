@@ -69,3 +69,9 @@ private func resolve(_ ps: [AudioProcess], titles: [String: String] = [:]) -> Re
                     titles: ["company.thebrowser.browser": "Talk - YouTube"])
     #expect(r.output == MeetingSource(app: "company.thebrowser.browser", title: "Talk - YouTube"))
 }
+
+@Test func displayNamesDropInvisibleFormattingCharacters() {
+    // WhatsApp's localized name starts with a left-to-right mark (U+200E).
+    #expect(SourceResolver.displayName("\u{200E}WhatsApp") == "WhatsApp")
+    #expect(SourceResolver.displayName(" Arc ") == "Arc")
+}

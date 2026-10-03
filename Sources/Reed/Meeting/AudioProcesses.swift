@@ -81,7 +81,7 @@ enum CoreAudioProperty {
 
 enum AppInfo {
     static func name(bundleID: String) -> String {
-        app(bundleID)?.localizedName ?? bundleID
+        app(bundleID)?.localizedName.map(SourceResolver.displayName) ?? bundleID
     }
 
     /// An app the user launched (Dock-level), as opposed to a system daemon
