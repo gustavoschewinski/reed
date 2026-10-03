@@ -22,6 +22,15 @@ struct FrameChunker {
         carry.removeFirst(start)
         return frames
     }
+
+    /// The leftover samples zero-padded to a full frame, or nil if none.
+    /// Call once at the end of the stream so the trailing audio is not lost.
+    mutating func flushRemainder() -> [Float]? {
+        guard !carry.isEmpty else { return nil }
+        let frame = carry + [Float](repeating: 0, count: frameSize - carry.count)
+        carry = []
+        return frame
+    }
 }
 
 struct SpeechSegment: Equatable, Sendable {
