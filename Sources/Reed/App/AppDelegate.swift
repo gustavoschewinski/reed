@@ -42,6 +42,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let meetings: MeetingController
     private var meetingsStarted = false
     private var meetingStateObservation: AnyCancellable?
+    /// Drives the status-item icon from meeting state. Only the image and
+    /// tint change; click handling is untouched.
+    private var meetingIndicator: AnyCancellable?
     /// Set once quitting has waited for meeting mode to close its transcript.
     private var meetingsShutDown = false
     /// Global escape monitor (Item 3): `OverlayPanel` can never become key
@@ -126,6 +129,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         item.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
 
         statusItem = item
+
+        meetingIndicator = meetings.$isCapturing
+            .combineLatest(meetings.$manualOn)
+            .sink { [weak self] capturing, manual in
+                let symbol = manual ? "record.circle" : (capturing ? "waveform.badge.mic" : "waveform")
+                self?.statusItem?.button?.image = NSImage(
+                    systemSymbolName: symbol, accessibilityDescription: "Reed"
+                )
+                self?.statusItem?.button?.contentTintColor = manual ? .systemRed : nil
+            }
 
         // `DictationSession` never touches UI (Ruling 2) — this is the one
         // place that watches its state and shows or hides the overlay.
@@ -433,6 +446,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         open.target = self
         menu.addItem(open)
 
+        let meeting = NSMenuItem(
+            title: meetings.manualOn ? "Stop Meeting" : "Start Meeting",
+            action: #selector(toggleMeetingFromMenu), keyEquivalent: ""
+        )
+        meeting.target = self
+        menu.addItem(meeting)
+
         menu.addItem(.separator())
 
         let settingsItem = NSMenuItem(
@@ -450,6 +470,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
 
         return menu
+    }
+
+    @objc private func toggleMeetingFromMenu() {
+        meetings.toggleManual()
     }
 
     @objc private func startDictationFromMenu() {
@@ -516,7 +540,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // makes it follow the system light/dark appearance, unlike the
             // always-dark overlay — see `Theme.Window`.
             window.contentView = NSHostingView(
-                rootView: MainWindowView(store: store, settings: settings, state: mainWindowState)
+                rootView: MainWindowView(
+                    store: store, settings: settings, meetings: meetings, state: mainWindowState
+                )
             )
 
             // Must happen before `makeKeyAndOrderFront` — an `.accessory`
