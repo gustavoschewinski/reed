@@ -130,14 +130,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         statusItem = item
 
+        // A meeting problem (a transcript that can't be saved, audio that
+        // can't be heard) tints the icon orange so it is seen outside
+        // Settings; the menu spells it out.
         meetingIndicator = meetings.$isCapturing
-            .combineLatest(meetings.$manualOn)
-            .sink { [weak self] capturing, manual in
+            .combineLatest(meetings.$manualOn, meetings.$problem)
+            .sink { [weak self] capturing, manual, problem in
                 let symbol = manual ? "record.circle" : (capturing ? "waveform.badge.mic" : "waveform")
                 self?.statusItem?.button?.image = NSImage(
                     systemSymbolName: symbol, accessibilityDescription: "Reed"
                 )
-                self?.statusItem?.button?.contentTintColor = manual ? .systemRed : nil
+                self?.statusItem?.button?.contentTintColor =
+                    problem != nil ? .systemOrange : (manual ? .systemRed : nil)
             }
 
         // `DictationSession` never touches UI (Ruling 2) — this is the one
@@ -306,19 +310,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
-    /// Item 1 (ship blocker): the one code path that runs on a normal Quit
-    /// — one click from the menu bar, mid-recording, mutes the machine
-    /// forever without it. `session.prepareForTermination()` unwinds every
-    /// side effect `begin()` may have started (chiefly the output mute)
-    /// synchronously, with no attempt to finish a pass or delivery — there
-    /// is no time left for that, and nothing here needs to succeed at
-    /// transcribing, only at not leaving the Mac silent.
-    ///
-    /// This does NOT cover a crash, force-quit, or logout: none of those
-    /// call `applicationWillTerminate` at all. That case is handled
-    /// separately, at the next launch — see `SystemAudio
-    /// .restoreLeftoverMuteIfNeeded()`, called before this run's own
-    /// `session` (and the `SystemAudio` it owns) can mute anything.
     /// Meeting mode gets up to 2 s to transcribe what it still holds and
     /// close its transcript; past that the last chunk is lost, which the
     /// spec accepts ("a crash loses at most one chunk"). Deferred
@@ -345,6 +336,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return .terminateLater
     }
 
+    /// Item 1 (ship blocker): the one code path that runs on a normal Quit
+    /// — one click from the menu bar, mid-recording, mutes the machine
+    /// forever without it. `session.prepareForTermination()` unwinds every
+    /// side effect `begin()` may have started (chiefly the output mute)
+    /// synchronously, with no attempt to finish a pass or delivery — there
+    /// is no time left for that, and nothing here needs to succeed at
+    /// transcribing, only at not leaving the Mac silent.
+    ///
+    /// This does NOT cover a crash, force-quit, or logout: none of those
+    /// call `applicationWillTerminate` at all. That case is handled
+    /// separately, at the next launch — see `SystemAudio
+    /// .restoreLeftoverMuteIfNeeded()`, called before this run's own
+    /// `session` (and the `SystemAudio` it owns) can mute anything.
     func applicationWillTerminate(_ notification: Notification) {
         session.prepareForTermination()
     }
@@ -429,6 +433,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func buildMenu() -> NSMenu {
         let menu = NSMenu()
+        // The `isEnabled` values below are the source of truth; automatic
+        // validation would enable any item whose target responds.
+        menu.autoenablesItems = false
 
         let start = NSMenuItem(
             title: startDictationTitle, action: #selector(startDictationFromMenu), keyEquivalent: ""
@@ -451,7 +458,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             action: #selector(toggleMeetingFromMenu), keyEquivalent: ""
         )
         meeting.target = self
+        // Meeting mode starts only once onboarding is done.
+        meeting.isEnabled = settings.hasCompletedOnboarding
         menu.addItem(meeting)
+
+        if let problem = meetings.problem {
+            let notice = NSMenuItem(title: problem, action: nil, keyEquivalent: "")
+            notice.isEnabled = false
+            menu.addItem(notice)
+        }
 
         menu.addItem(.separator())
 
