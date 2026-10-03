@@ -46,13 +46,17 @@ enum SourceResolver {
         return meetingTitleMarkers.contains(where: lower.contains) ? title : nil
     }
 
+    /// `isUserApp` filters out system daemons: macOS's own speech service
+    /// (`com.apple.CoreSpeech`) holds the microphone all day, which is not a
+    /// call and must not open Reed's mic in automatic mode.
     static func resolve(
         _ processes: [AudioProcess], ownPID: pid_t,
-        appName: (String) -> String, windowTitle: (String) -> String?
+        appName: (String) -> String, windowTitle: (String) -> String?,
+        isUserApp: (String) -> Bool = { _ in true }
     ) -> ResolvedSources {
-        let others = processes.filter { $0.pid != ownPID }
+        let others = processes.filter { $0.pid != ownPID && isUserApp(canonicalBundleID($0.bundleID)) }
         func source(for bundle: String) -> MeetingSource {
-            let title = browsers.contains(bundle) ? windowTitle(bundle).flatMap(meetingTitle) : nil
+            let title = isBrowser(bundle) ? windowTitle(bundle).flatMap(meetingTitle) : nil
             return MeetingSource(app: appName(bundle), title: title)
         }
         func best(_ list: [AudioProcess]) -> String? {
@@ -64,8 +68,14 @@ enum SourceResolver {
     }
 
     private static func rank(_ bundle: String) -> Int {
-        if callApps.contains(bundle) { return 0 }
-        if browsers.contains(bundle) { return 1 }
+        if callApps.contains(where: { $0.caseInsensitiveCompare(bundle) == .orderedSame }) { return 0 }
+        if isBrowser(bundle) { return 1 }
         return 2
+    }
+
+    /// Bundle IDs are compared ignoring case: helper processes don't always
+    /// report the app's own capitalization (Arc's is all lowercase).
+    private static func isBrowser(_ bundle: String) -> Bool {
+        browsers.contains(where: { $0.caseInsensitiveCompare(bundle) == .orderedSame })
     }
 }

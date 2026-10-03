@@ -79,6 +79,7 @@ final class MeetingController: ObservableObject {
     /// by the time they are transcribed `sources` may already be reset.
     private var retiredSources: [ObjectIdentifier: MeetingSource] = [:]
     private var lastPlaying: Date?
+    private var lastLoggedPlan: CapturePlan?
     private var watchdog = SilenceWatchdog()
     private var tapRetryAfter = Date.distantPast
     private var micRetryAfter = Date.distantPast
@@ -229,7 +230,8 @@ final class MeetingController: ObservableObject {
             warmDetectorOnce()
             sources = SourceResolver.resolve(
                 AudioProcesses.current(), ownPID: getpid(),
-                appName: AppInfo.name(bundleID:), windowTitle: AppInfo.focusedWindowTitle(bundleID:))
+                appName: AppInfo.name(bundleID:), windowTitle: AppInfo.focusedWindowTitle(bundleID:),
+                isUserApp: AppInfo.isUserApp(bundleID:))
             if sources.output != nil { lastPlaying = now }
         } else {
             // Nobody asked for meeting mode: skip the Core Audio and
@@ -270,6 +272,10 @@ final class MeetingController: ObservableObject {
             manualOn: manualOn, autoEnabled: settings.meetingAutoMode, systemAudioAvailable: available,
             somethingPlaying: isPlaying(now), micInUseElsewhere: sources.micInUseElsewhere, dictating: dictating
         ))
+        if plan != lastLoggedPlan {
+            DebugLog.log("Meeting plan tap=\(plan.systemTap) mic=\(plan.mic) auto=\(settings.meetingAutoMode) manual=\(manualOn) playing=\(isPlaying(now)) call=\(sources.micInUseElsewhere) source=\(sources.current.app)")
+            lastLoggedPlan = plan
+        }
         if plan.systemTap { startSystem(now: now) } else { stopSystem() }
         if plan.mic { startMic(now: now) } else { stopMic() }
         isCapturing = tap != nil || mic != nil
@@ -289,9 +295,11 @@ final class MeetingController: ObservableObject {
             try newTap.start()
             tap = newTap
             systemChannel = channel
+            DebugLog.log("Meeting system tap started")
             watchdog.tapStarted()
         } catch {
             NSLog("Reed meeting: system audio tap failed to start: %@", String(describing: error))
+            DebugLog.log("Meeting system tap failed: \(error)")
             problem = "Meeting mode couldn't capture your Mac's audio (\(error))."
             tapRetryAfter = now.addingTimeInterval(Self.retryDelay)
             retire(channel)
@@ -354,17 +362,23 @@ final class MeetingController: ObservableObject {
     private func startMic(now: Date) {
         guard mic == nil, now >= micRetryAfter else { return }
         let channel = makeChannel(.me)
-        let recorder = Recorder(keepsRecording: false, voiceProcessing: true)
+        // No voice processing: on a real Mac it delivered only zeros while
+        // flooding the log with downlink I/O faults (the engine has no output
+        // to cancel against). Without it, speakers without headphones can
+        // leak the other side into the "Me" channel.
+        let recorder = Recorder(keepsRecording: false, voiceProcessing: false)
         recorder.onSamples = { channel.feed($0) }
         do {
             try recorder.start(deviceID: settings.inputDeviceID)
             mic = recorder
             micChannel = channel
+            DebugLog.log("Meeting mic started")
             micConfigObserver = recorder.observeConfigurationChange { [weak self] in
                 self?.audioDeviceChanged(system: false, mic: true)
             }
         } catch {
             NSLog("Reed meeting: microphone failed to start: %@", String(describing: error))
+            DebugLog.log("Meeting mic failed: \(error)")
             problem = "Meeting mode couldn't open the microphone."
             micRetryAfter = now.addingTimeInterval(Self.retryDelay)
             retire(channel)
@@ -407,11 +421,13 @@ final class MeetingController: ObservableObject {
     private func ingest(_ output: ChannelOutput, from channel: ObjectIdentifier?) {
         let source = channel.flatMap { retiredSources[$0] } ?? sources.current
         let chunk = MeetingChunk(source: source, start: output.start, end: output.end, lines: [output.line])
+        DebugLog.log("Meeting ingest speaker=\(output.speaker) source=\(source.app) seconds=\(Int(output.end.timeIntervalSince(output.start)))")
         apply(tracker.ingest(chunk))
     }
 
     private func apply(_ actions: [SessionAction]) {
         guard !actions.isEmpty else { return }
+        DebugLog.log("Meeting apply \(actions.count) action(s), file=\(writer.currentFile?.lastPathComponent ?? "none")")
         do {
             try writer.apply(actions)
         } catch {

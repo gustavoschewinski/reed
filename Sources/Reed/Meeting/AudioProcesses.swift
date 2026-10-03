@@ -81,14 +81,28 @@ enum CoreAudioProperty {
 
 enum AppInfo {
     static func name(bundleID: String) -> String {
-        NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first?.localizedName ?? bundleID
+        app(bundleID)?.localizedName ?? bundleID
+    }
+
+    /// An app the user launched (Dock-level), as opposed to a system daemon
+    /// or agent that happens to hold an audio device.
+    static func isUserApp(bundleID: String) -> Bool {
+        app(bundleID)?.activationPolicy == .regular
+    }
+
+    /// Case-insensitive: helper processes don't always report the app's
+    /// own capitalization (Arc's is all lowercase).
+    private static func app(_ bundleID: String) -> NSRunningApplication? {
+        NSWorkspace.shared.runningApplications.first {
+            $0.bundleIdentifier?.caseInsensitiveCompare(bundleID) == .orderedSame
+        }
     }
 
     /// The focused window's title, via the Accessibility permission Reed
     /// already holds for pasting. `nil` without it — sessions are then
     /// named by app only, which still works.
     static func focusedWindowTitle(bundleID: String) -> String? {
-        guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first else { return nil }
+        guard let app = app(bundleID) else { return nil }
         let element = AXUIElementCreateApplication(app.processIdentifier)
         // Polled from the main actor every 2 s: a hung app would otherwise
         // block it for the default ~6 s AX timeout. The timeout is

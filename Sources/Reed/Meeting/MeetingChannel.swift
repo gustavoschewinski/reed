@@ -122,6 +122,10 @@ actor MeetingChannel {
         await emit(segmenter.flush())
     }
 
+    private var statPeak: Float = 0
+    private var statSamples = 0
+    private var statSpeechFrames = 0
+
     private func process(_ chunk: Chunk) async {
         let duration = Double(chunk.samples.count) / sampleRate
         let chunkStart = chunk.capturedAt.addingTimeInterval(-duration)
@@ -134,6 +138,12 @@ actor MeetingChannel {
             origin = chunkStart.addingTimeInterval(-streamTime)
         }
         samplesSeen += chunk.samples.count
+        statPeak = max(statPeak, chunk.samples.reduce(0) { max($0, abs($1)) })
+        statSamples += chunk.samples.count
+        if Double(statSamples) / sampleRate >= 10 {
+            DebugLog.log("Meeting (\(speaker)) 10s: peak=\(statPeak) speechFrames=\(statSpeechFrames)")
+            statPeak = 0; statSamples = 0; statSpeechFrames = 0
+        }
         for frame in chunker.push(chunk.samples) { await process(frame: frame) }
     }
 
@@ -141,6 +151,7 @@ actor MeetingChannel {
         // Digital silence (nothing playing, or a tap without permission) is
         // never speech; skip Silero rather than run it on zeros all day.
         let speech = frame.allSatisfy({ $0 == 0 }) ? false : await detectSpeech(frame)
+        if speech { statSpeechFrames += 1 }
         await emit(segmenter.push(frame: frame, isSpeech: speech))
     }
 
@@ -164,6 +175,7 @@ actor MeetingChannel {
             let line: MeetingLine
             do {
                 let pass = try await transcriber.transcribe(segment.samples, timeOffset: 0)
+                DebugLog.log("Meeting (\(speaker)) segment \(segment.samples.count) samples -> \(pass.text.count) chars")
                 guard !pass.text.isEmpty else { continue }
                 line = MeetingLine(time: start, kind: .speech(speaker, pass.text))
             } catch {

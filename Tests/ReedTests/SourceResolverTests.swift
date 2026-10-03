@@ -50,3 +50,22 @@ private func resolve(_ ps: [AudioProcess], titles: [String: String] = [:]) -> Re
     let r = resolve([p("com.google.Chrome.helper", out: true)], titles: ["com.google.Chrome": "Inbox - Gmail"])
     #expect(r.output == MeetingSource(app: "com.google.Chrome", title: nil))
 }
+
+@Test func systemDaemonsHoldingTheMicAreNotACall() {
+    // macOS's own speech daemon keeps the microphone open all day; it is
+    // not a call and must not open Reed's mic in automatic mode.
+    let r = SourceResolver.resolve(
+        [p("com.apple.CoreSpeech", out: true, input: true), p("com.google.Chrome.helper", out: true)],
+        ownPID: me, appName: { $0 }, windowTitle: { _ in nil },
+        isUserApp: { $0 != "com.apple.CoreSpeech" }
+    )
+    #expect(r.call == nil)
+    #expect(r.output == MeetingSource(app: "com.google.Chrome"))
+}
+
+@Test func bundleIDsMatchKnownAppsRegardlessOfCase() {
+    // Arc's helper reports a lowercase bundle ID.
+    let r = resolve([p("company.thebrowser.browser.helper", out: true), p("com.spotify.client", out: true)],
+                    titles: ["company.thebrowser.browser": "Talk - YouTube"])
+    #expect(r.output == MeetingSource(app: "company.thebrowser.browser", title: "Talk - YouTube"))
+}
