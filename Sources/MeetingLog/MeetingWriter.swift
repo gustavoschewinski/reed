@@ -24,7 +24,13 @@ public final class MeetingWriter {
                 try flush()
             case .append(let lines, let ended):
                 guard var session = open else { continue }
-                session.lines += lines
+                // Me and Others are transcribed separately, so lines can
+                // arrive out of order. Insert each after every line not
+                // later than it: time order, ties kept in arrival order.
+                for line in lines {
+                    let index = session.lines.lastIndex { $0.time <= line.time }.map { $0 + 1 } ?? 0
+                    session.lines.insert(line, at: index)
+                }
                 session.header.ended = max(session.header.ended, ended)
                 open = session
                 try flush()
@@ -37,6 +43,8 @@ public final class MeetingWriter {
     private func flush() throws {
         guard let open else { return }
         try Data(format.render(open.header, lines: open.lines).utf8).write(to: open.url, options: .atomic)
+        // An atomic write replaces the file, so the mode is set every time.
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: open.url.path)
     }
 
     private func prepareDirectory() throws {

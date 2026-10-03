@@ -27,10 +27,28 @@ private func line(_ offset: TimeInterval, _ text: String) -> MeetingLine {
 
     let perms = try FileManager.default.attributesOfItem(atPath: dir.path)[.posixPermissions] as? Int
     #expect(perms == 0o700)
-    let text = try String(contentsOf: try #require(writer.currentFile), encoding: .utf8)
+    let file = try #require(writer.currentFile)
+    let filePerms = try FileManager.default.attributesOfItem(atPath: file.path)[.posixPermissions] as? Int
+    #expect(filePerms == 0o600)
+    let text = try String(contentsOf: file, encoding: .utf8)
     #expect(text.contains("ended: 2026-10-02T14:00:40Z"))
     #expect(text.contains("** olá\n"))
     #expect(text.contains("** tchau\n"))
+}
+
+@Test func linesArriveOutOfOrderButAreWrittenInTimeOrder() throws {
+    // Me and Others are transcribed separately, so a later line from one
+    // channel can be appended before an earlier line from the other.
+    let dir = tempDir()
+    let writer = MeetingWriter(directory: dir, format: MeetingFormat(timeZone: utc))
+    let h = header(0, length: 60)
+    try writer.apply([.open(h), .append([line(0, "one"), line(40, "four")], ended: t0.addingTimeInterval(45))])
+    try writer.apply([.append([line(10, "two"), line(40, "five")], ended: t0.addingTimeInterval(45))])
+    try writer.apply([.append([line(20, "three")], ended: t0.addingTimeInterval(25))])
+    let text = try String(contentsOf: try #require(writer.currentFile), encoding: .utf8)
+    let order = ["one", "two", "three", "four", "five"].compactMap { text.range(of: "** \($0)\n")?.lowerBound }
+    #expect(order.count == 5)
+    #expect(order == order.sorted())
 }
 
 @Test func twoSessionsInTheSameMinuteGetDistinctFiles() throws {
