@@ -211,7 +211,10 @@ struct SettingsView: View {
                             .accessibilityLabel("Listen automatically")
                     }
                     Rule()
-                    Field(title: "Keep transcripts for") {
+                    Field(
+                        title: "Keep transcripts for",
+                        note: "Older transcripts are deleted automatically. Forever keeps them until you delete them."
+                    ) {
                         Picker("", selection: $settings.meetingRetentionDays) {
                             Text("1 day").tag(1)
                             Text("7 days").tag(7)
@@ -237,9 +240,15 @@ struct SettingsView: View {
                                 )
                             }
                             Button("Open folder") {
-                                try? FileManager.default.createDirectory(
-                                    at: MeetingPaths.defaultDirectory, withIntermediateDirectories: true
-                                )
+                                do {
+                                    try FileManager.default.createDirectory(
+                                        at: MeetingPaths.defaultDirectory,
+                                        withIntermediateDirectories: true,
+                                        attributes: [.posixPermissions: 0o700]
+                                    )
+                                } catch {
+                                    NSLog("Reed: could not create the meetings folder: \(error)")
+                                }
                                 NSWorkspace.shared.open(MeetingPaths.defaultDirectory)
                             }
                         }

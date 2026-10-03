@@ -29,7 +29,7 @@ A Homebrew cask lives in [`Casks/reed.rb`](Casks/reed.rb), but the tap isn't pub
 
 ## First run
 
-Reed asks for two permissions, downloads its speech models (~600 MB, with a real progress bar), and compiles it for the Neural Engine (about 20 seconds, once). Then you pick a shortcut and you're dictating. None of it repeats on later launches.
+Reed asks for two permissions, downloads its speech models (~600 MB, with a real progress bar), and compiles the main one for the Neural Engine (about 20 seconds, once). Then you pick a shortcut and you're dictating. None of it repeats on later launches.
 
 | Permission | Why |
 | --- | --- |
@@ -73,7 +73,7 @@ If the proofread fails (no network, a rejected key, a model that doesn't exist),
 
 Press the meeting shortcut (**Option+-** by default) and Reed transcribes your microphone and whatever your Mac is playing, so both sides of a call end up in one text file. Press it again to stop. Audio is never saved, only the text, and it all happens on your Mac. Change the shortcut in **Settings → Meetings**.
 
-**Listen automatically** is off by default. When it's on, Reed transcribes speech your Mac plays, and joins your microphone only while another app is using it (a call). Silence and music are skipped. The menu bar icon shows a red dot while you've started a meeting yourself.
+**Listen automatically** is off by default. When it's on, Reed transcribes speech your Mac plays, and joins your microphone only while another app is using it (a call). Silence and music are skipped. The menu bar icon turns red while you've started a meeting yourself.
 
 Transcripts are kept for 7 days by default. Pick 1 day, 30 days or forever in settings.
 
