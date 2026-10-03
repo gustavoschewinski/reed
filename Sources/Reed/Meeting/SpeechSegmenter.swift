@@ -7,6 +7,7 @@ struct FrameChunker {
     private var carry: [Float] = []
 
     init(frameSize: Int = 4096) {
+        precondition(frameSize > 0)
         self.frameSize = frameSize
     }
 
@@ -44,6 +45,11 @@ struct SpeechSegmenter {
     /// repeated as pre-roll.
     private var skipPreRoll = false
 
+    /// - Parameters:
+    ///   - frameSize: Accepted for symmetry; segments are built from whatever frames are pushed.
+    ///   - sampleRate: Sample rate in Hz.
+    ///   - maxSeconds: Maximum segment duration in seconds.
+    ///   - minSeconds: Minimum segment duration in seconds to emit.
     init(frameSize: Int = 4096, sampleRate: Double = reedSampleRate, maxSeconds: Double = 30, minSeconds: Double = 0.5) {
         maxSamples = Int(maxSeconds * sampleRate)
         minSamples = Int(minSeconds * sampleRate)
@@ -61,6 +67,15 @@ struct SpeechSegmenter {
                 current = preRoll
                 skipPreRoll = false
             }
+            // Check if appending this frame would exceed maxSamples.
+            if !current.isEmpty && current.count + frame.count > maxSamples {
+                skipPreRoll = true
+                let segment = emit()
+                // Start the next segment with this frame (no pre-roll because we just emitted).
+                currentStart = processed
+                current = frame
+                return segment
+            }
             current += frame
             guard current.count >= maxSamples else { return [] }
             skipPreRoll = true
@@ -71,6 +86,7 @@ struct SpeechSegmenter {
             return []
         }
         current += frame
+        skipPreRoll = true
         return emit()
     }
 

@@ -19,6 +19,8 @@ actor SileroModel {
     }
 }
 
+/// Detects speech using the Silero VAD model.
+/// Calls must be serial per instance (actor reentrancy across awaits is not safe for VAD state).
 actor SileroSpeechDetector: SpeechDetector {
     private var state: VadStreamState?
 

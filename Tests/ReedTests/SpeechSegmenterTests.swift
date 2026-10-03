@@ -38,3 +38,66 @@ private func frame(_ v: Float, _ n: Int = 4) -> [Float] { Array(repeating: v, co
     for _ in 0..<50 { #expect(s.push(frame: frame(0), isSpeech: false) == []) }
     #expect(s.flush() == [])
 }
+
+@Test func nonAlignedMaxBoundaryProducesNoExceedingSegments() {
+    // frameSize 4, sampleRate 4, maxSeconds 2.5 → maxSamples 10
+    var s = SpeechSegmenter(frameSize: 4, sampleRate: 4, maxSeconds: 2.5, minSeconds: 0)
+    var allSegments: [SpeechSegment] = []
+
+    // Push continuous speech that will be cut at max boundary.
+    // We'll push enough frames to create multiple segments.
+    for i in 0..<10 {
+        let f = Array(repeating: Float(i), count: 4)
+        let segments = s.push(frame: f, isSpeech: true)
+        allSegments.append(contentsOf: segments)
+    }
+    allSegments.append(contentsOf: s.flush())
+
+    // Verify no segment exceeds maxSamples (10).
+    for segment in allSegments {
+        #expect(segment.samples.count <= 10)
+    }
+
+    // Verify no overlap and no gap: concatenation of segments (ordered by startSample)
+    // equals the original continuous speech.
+    let sorted = allSegments.sorted { $0.startSample < $1.startSample }
+    var expectedSample = 0
+    for segment in sorted {
+        #expect(segment.startSample == expectedSample)
+        expectedSample += segment.samples.count
+    }
+}
+
+@Test func tailFrameNotReusedAsPreRoll() {
+    // Test: speech → silence (tail) → speech → silence (tail)
+    // Two segments, no frame reuse, no overlap.
+    var s = SpeechSegmenter(frameSize: 4, sampleRate: 4, maxSeconds: 100, minSeconds: 0)
+    var allSegments: [SpeechSegment] = []
+
+    // First segment: speech, silence (tail)
+    allSegments.append(contentsOf: s.push(frame: frame(1), isSpeech: true))
+    allSegments.append(contentsOf: s.push(frame: frame(0), isSpeech: false))
+
+    // Second segment: speech, silence (tail)
+    allSegments.append(contentsOf: s.push(frame: frame(2), isSpeech: true))
+    allSegments.append(contentsOf: s.push(frame: frame(0), isSpeech: false))
+
+    allSegments.append(contentsOf: s.flush())
+
+    // Should have exactly two segments.
+    #expect(allSegments.count == 2)
+
+    // Second segment should start where first ends (no overlap).
+    #expect(allSegments[1].startSample == allSegments[0].startSample + allSegments[0].samples.count)
+
+    // First segment should contain [1,1,1,1,0,0,0,0], second should contain [2,2,2,2,0,0,0,0].
+    #expect(allSegments[0].samples == frame(1) + frame(0))
+    #expect(allSegments[1].samples == frame(2) + frame(0))
+
+    // Verify no frame value appears in both segments (no reuse).
+    let firstValues = Set(allSegments[0].samples)
+    let secondValues = Set(allSegments[1].samples)
+    #expect(firstValues.intersection(secondValues).isEmpty == false)  // They both have 0.0 (tail), which is okay
+    // But frame(0) from first tail should not be the same as frame(1) or frame(2) pre-roll
+    #expect(!allSegments[1].samples.starts(with: allSegments[0].samples.suffix(4)))
+}
