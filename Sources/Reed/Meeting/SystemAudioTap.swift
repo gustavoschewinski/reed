@@ -87,15 +87,19 @@ final class SystemAudioTap: @unchecked Sendable {
             let list = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: input))
             guard let chosen = SystemAudioTap.tapBuffer(in: list) else { return }
             var single = AudioBufferList(mNumberBuffers: 1, mBuffers: chosen)
-            guard let buffer = AVAudioPCMBuffer(pcmFormat: format, bufferListNoCopy: &single, deallocator: nil)
-            else { return }
-            let samples: [Float]
-            do { samples = try resampler.append(buffer) } catch {
-                NSLog("Reed: system audio conversion failed: %@", String(describing: error))
-                return
+            // `bufferListNoCopy` keeps the pointer, so the buffer must not
+            // outlive this scope: create it, convert it and hand off inside.
+            withUnsafeMutablePointer(to: &single) { pointer in
+                guard let buffer = AVAudioPCMBuffer(pcmFormat: format, bufferListNoCopy: pointer, deallocator: nil)
+                else { return }
+                let samples: [Float]
+                do { samples = try resampler.append(buffer) } catch {
+                    NSLog("Reed: system audio conversion failed: %@", String(describing: error))
+                    return
+                }
+                guard !samples.isEmpty else { return }
+                handler?(samples)
             }
-            guard !samples.isEmpty else { return }
-            handler?(samples)
         }
         guard status == noErr, let proc else { stop(); throw SystemAudioTapError.ioProc(status) }
         procID = proc
