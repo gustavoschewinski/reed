@@ -14,7 +14,17 @@ enum SystemAudioTapError: Error {
 /// time; the IOProc block runs on `queue` and touches only values captured
 /// at start (`handler`, `resampler`, `format`), never this object's state.
 final class SystemAudioTap: @unchecked Sendable {
+    /// Must be set before `start()`; later changes take effect on the next `start()`.
     var onSamples: (@Sendable ([Float]) -> Void)?
+
+    /// The tap's buffer within the IOProc's input list. The aggregate device
+    /// also carries the output sub-device, and if that device has input
+    /// streams (a headset mic) their buffers come first; the tap's streams
+    /// are appended last. The tap is mono, so it is exactly one buffer.
+    static func tapBuffer(in list: UnsafeMutableAudioBufferListPointer) -> AudioBuffer? {
+        guard let last = list.last, last.mDataByteSize > 0, last.mData != nil else { return nil }
+        return last
+    }
 
     private var tapID = AudioObjectID(kAudioObjectUnknown)
     private var aggregateID = AudioObjectID(kAudioObjectUnknown)
@@ -25,7 +35,12 @@ final class SystemAudioTap: @unchecked Sendable {
         guard #available(macOS 14.2, *) else { throw SystemAudioTapError.unsupported }
         stop()
 
-        let excluded = AudioProcesses.ownProcessObject().map { [$0] } ?? []
+        let ownProcess = AudioProcesses.ownProcessObject()
+        if ownProcess == nil {
+            NSLog("Reed: own audio process object not found; Reed's cues are not excluded from the tap")
+        }
+        if onSamples == nil { NSLog("Reed: SystemAudioTap.start() called with no onSamples handler") }
+        let excluded = ownProcess.map { [$0] } ?? []
         let description = CATapDescription(monoGlobalTapButExcludeProcesses: excluded)
         description.uuid = UUID()
         description.name = "Reed meeting capture"
@@ -69,9 +84,17 @@ final class SystemAudioTap: @unchecked Sendable {
         let handler = onSamples
         var proc: AudioDeviceIOProcID?
         status = AudioDeviceCreateIOProcIDWithBlock(&proc, aggregateDevice, queue) { _, input, _, _, _ in
-            guard let buffer = AVAudioPCMBuffer(pcmFormat: format, bufferListNoCopy: input, deallocator: nil),
-                  let samples = try? resampler.append(buffer), !samples.isEmpty
+            let list = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: input))
+            guard let chosen = SystemAudioTap.tapBuffer(in: list) else { return }
+            var single = AudioBufferList(mNumberBuffers: 1, mBuffers: chosen)
+            guard let buffer = AVAudioPCMBuffer(pcmFormat: format, bufferListNoCopy: &single, deallocator: nil)
             else { return }
+            let samples: [Float]
+            do { samples = try resampler.append(buffer) } catch {
+                NSLog("Reed: system audio conversion failed: %@", String(describing: error))
+                return
+            }
+            guard !samples.isEmpty else { return }
             handler?(samples)
         }
         guard status == noErr, let proc else { stop(); throw SystemAudioTapError.ioProc(status) }

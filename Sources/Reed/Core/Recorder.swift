@@ -232,6 +232,16 @@ final class Recorder {
         DebugLog.log("Recorder.start() entry, deviceID=\(deviceID.map(String.init(describing:)) ?? "default")")
         buffer.reset()
 
+        // Before the explicit device: enabling voice processing swaps the
+        // input unit and can drop a device chosen earlier.
+        if voiceProcessing {
+            try engine.inputNode.setVoiceProcessingEnabled(true)
+            // Default ducking lowers every other app while the mic is open —
+            // exactly wrong during a call the user is listening to.
+            engine.inputNode.voiceProcessingOtherAudioDuckingConfiguration =
+                AVAudioVoiceProcessingOtherAudioDuckingConfiguration(enableAdvancedDucking: false, duckingLevel: .min)
+        }
+
         if let deviceID {
             var id = deviceID
             guard let unit = engine.inputNode.audioUnit else {
@@ -262,13 +272,6 @@ final class Recorder {
         // caller can act on, instead of something AppKit swallows at the top
         // of the run loop while leaving the recording half-started.
         let input = engine.inputNode
-        if voiceProcessing {
-            try input.setVoiceProcessingEnabled(true)
-            // Default ducking lowers every other app while the mic is open —
-            // exactly wrong during a call the user is listening to.
-            input.voiceProcessingOtherAudioDuckingConfiguration =
-                AVAudioVoiceProcessingOtherAudioDuckingConfiguration(enableAdvancedDucking: false, duckingLevel: .min)
-        }
         try ObjCException.catching { engine.prepare() }
 
         // `inputFormat(forBus: 0)`, not `outputFormat(forBus: 0)`. They are
