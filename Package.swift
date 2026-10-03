@@ -41,7 +41,7 @@ let package = Package(
         ),
         .testTarget(
             name: "ReedTests",
-            dependencies: ["Reed"],
+            dependencies: ["Reed", "MeetingLog"],
             path: "Tests/ReedTests"
         ),
         .testTarget(
