@@ -17,10 +17,23 @@ let package = Package(
             name: "ReedObjC",
             path: "Sources/ReedObjC"
         ),
+        // Everything about a meeting file that both the app (which writes
+        // them) and reed-mcp (which reads them) must agree on. Foundation
+        // only, so the MCP binary stays small and never links CoreML.
+        .target(
+            name: "MeetingLog",
+            path: "Sources/MeetingLog"
+        ),
+        .executableTarget(
+            name: "ReedMCP",
+            dependencies: ["MeetingLog"],
+            path: "Sources/ReedMCP"
+        ),
         .executableTarget(
             name: "Reed",
             dependencies: [
                 "ReedObjC",
+                "MeetingLog",
                 .product(name: "FluidAudio", package: "FluidAudio"),
                 .product(name: "KeyboardShortcuts", package: "KeyboardShortcuts"),
             ],
@@ -30,6 +43,11 @@ let package = Package(
             name: "ReedTests",
             dependencies: ["Reed"],
             path: "Tests/ReedTests"
+        ),
+        .testTarget(
+            name: "MeetingLogTests",
+            dependencies: ["MeetingLog"],
+            path: "Tests/MeetingLogTests"
         ),
     ]
 )
