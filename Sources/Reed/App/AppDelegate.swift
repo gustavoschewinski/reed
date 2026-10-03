@@ -35,6 +35,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// timing — see `HotkeyMonitor`'s doc comment.
     private let proofreadHotkeyMonitor = HotkeyMonitor(name: .proofread)
     private var stateObservation: AnyCancellable?
+
+    /// Meeting mode. Always constructed (Settings needs it), but only
+    /// started — polling, its shortcut, the dictation observation — once
+    /// onboarding is complete; see `startMeetingsIfReady()`.
+    private let meetings: MeetingController
+    private var meetingsStarted = false
+    private var meetingStateObservation: AnyCancellable?
+    /// Set once quitting has waited for meeting mode to close its transcript.
+    private var meetingsShutDown = false
     /// Global escape monitor (Item 3): `OverlayPanel` can never become key
     /// (see its own doc comment — the synthetic ⌘V a paste depends on would
     /// otherwise land in the overlay instead of the app being dictated
@@ -97,6 +106,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             store: store,
             settings: settings
         )
+        self.meetings = MeetingController(settings: settings, transcriber: transcriber)
         super.init()
     }
 
@@ -169,6 +179,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // if a real dictation gets there first anyway.
             warmModel()
         }
+        startMeetingsIfReady()
+    }
+
+    /// Starts meeting mode once onboarding is done (mic permission and the
+    /// speech model are in place). Called at launch and when onboarding
+    /// finishes; idempotent.
+    private func startMeetingsIfReady() {
+        guard settings.hasCompletedOnboarding, !meetingsStarted else { return }
+        meetingsStarted = true
+        meetings.start()
+        KeyboardShortcuts.onKeyDown(for: .meeting) { [weak self] in self?.meetings.toggleManual() }
+        // The value from the publisher, not `session.state`: `@Published`
+        // emits before the property is updated.
+        meetingStateObservation = session.$state
+            .map { $0 != .idle }
+            .removeDuplicates()
+            .sink { [weak self] dictating in self?.meetings.dictationChanged(isDictating: dictating) }
     }
 
     /// Both shortcuts land here; `proofread` is the only difference
@@ -266,6 +293,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// separately, at the next launch — see `SystemAudio
     /// .restoreLeftoverMuteIfNeeded()`, called before this run's own
     /// `session` (and the `SystemAudio` it owns) can mute anything.
+    /// Meeting mode gets up to 2 s to transcribe what it still holds and
+    /// close its transcript; past that the last chunk is lost, which the
+    /// spec accepts ("a crash loses at most one chunk"). Deferred
+    /// termination rather than blocking in `applicationWillTerminate`:
+    /// `shutdown()` needs the main actor, so a blocking wait there would
+    /// deadlock until the timeout.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard !meetingsShutDown else { return .terminateNow }
+        var replied = false
+        let reply = { [weak self] in
+            guard !replied else { return }
+            replied = true
+            self?.meetingsShutDown = true
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        Task { [meetings] in
+            await meetings.shutdown()
+            reply()
+        }
+        Task {
+            try? await Task.sleep(for: .seconds(2))
+            reply()
+        }
+        return .terminateLater
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         session.prepareForTermination()
     }
@@ -553,6 +606,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             },
             finish: { [weak self] in
                 self?.settings.hasCompletedOnboarding = true
+                self?.startMeetingsIfReady()
                 self?.onboardingWindow?.close()
                 self?.onboardingWindow = nil
             }

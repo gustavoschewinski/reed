@@ -93,3 +93,18 @@ import Testing
     #expect(second.proofreadStyle == .polish)
     #expect(second.isProofreadConfigured)
 }
+
+// MARK: - Meeting mode
+
+@MainActor
+@Test func meetingSettingsDefaultAndPersist() {
+    let defaults = FakeUserDefaults()
+    let settings = Settings(defaults: defaults, secrets: FakeSecretStore())
+    #expect(settings.meetingAutoMode == false)
+    #expect(settings.meetingRetentionDays == 7)
+    settings.meetingAutoMode = true
+    settings.meetingRetentionDays = 30
+    let reloaded = Settings(defaults: defaults, secrets: FakeSecretStore())
+    #expect(reloaded.meetingAutoMode == true)
+    #expect(reloaded.meetingRetentionDays == 30)
+}

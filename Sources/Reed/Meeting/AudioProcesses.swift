@@ -90,13 +90,19 @@ enum AppInfo {
     static func focusedWindowTitle(bundleID: String) -> String? {
         guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first else { return nil }
         let element = AXUIElementCreateApplication(app.processIdentifier)
+        // Polled from the main actor every 2 s: a hung app would otherwise
+        // block it for the default ~6 s AX timeout. The timeout is
+        // per element, so the window gets its own below.
+        AXUIElementSetMessagingTimeout(element, 0.25)
         var window: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, kAXFocusedWindowAttribute as CFString, &window) == .success,
               let window, CFGetTypeID(window) == AXUIElementGetTypeID()
         else { return nil }
-        var title: CFTypeRef?
         // swiftlint:disable:next force_cast
-        guard AXUIElementCopyAttributeValue(window as! AXUIElement, kAXTitleAttribute as CFString, &title) == .success else { return nil }
+        let windowElement = window as! AXUIElement
+        AXUIElementSetMessagingTimeout(windowElement, 0.25)
+        var title: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(windowElement, kAXTitleAttribute as CFString, &title) == .success else { return nil }
         guard let text = title as? String, !text.isEmpty else { return nil }
         return text
     }

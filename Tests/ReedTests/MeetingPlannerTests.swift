@@ -63,3 +63,36 @@ private func withList(_ sizes: [UInt32], _ body: (UnsafeMutableAudioBufferListPo
         #expect(SystemAudioTap.tapBuffer(in: list) == nil)
     }
 }
+
+// MARK: - MeetingPlanner
+
+private func inputs(manual: Bool = false, auto: Bool = false, available: Bool = true, playing: Bool = false,
+                    call: Bool = false, dictating: Bool = false) -> CaptureInputs {
+    CaptureInputs(manualOn: manual, autoEnabled: auto, systemAudioAvailable: available,
+                  somethingPlaying: playing, micInUseElsewhere: call, dictating: dictating)
+}
+
+@Test func offCapturesNothing() {
+    #expect(MeetingPlanner.plan(inputs(playing: true, call: true)) == CapturePlan(systemTap: false, mic: false))
+}
+
+@Test func manualCapturesBothSides() {
+    #expect(MeetingPlanner.plan(inputs(manual: true)) == CapturePlan(systemTap: true, mic: true))
+}
+
+@Test func autoListensToTheMacOnlyWhileSomethingPlays() {
+    #expect(MeetingPlanner.plan(inputs(auto: true)) == CapturePlan(systemTap: false, mic: false))
+    #expect(MeetingPlanner.plan(inputs(auto: true, playing: true)) == CapturePlan(systemTap: true, mic: false))
+}
+
+@Test func autoOpensTheMicOnlyDuringACall() {
+    #expect(MeetingPlanner.plan(inputs(auto: true, playing: true, call: true)) == CapturePlan(systemTap: true, mic: true))
+}
+
+@Test func dictationTakesTheMic() {
+    #expect(MeetingPlanner.plan(inputs(manual: true, dictating: true)) == CapturePlan(systemTap: true, mic: false))
+}
+
+@Test func withoutSystemAudioManualIsMicOnly() {
+    #expect(MeetingPlanner.plan(inputs(manual: true, available: false)) == CapturePlan(systemTap: false, mic: true))
+}
