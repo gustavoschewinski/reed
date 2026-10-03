@@ -70,14 +70,25 @@ final class MeetingController: ObservableObject {
     private var dictating = false
     private var warmedDetector = false
     private var stopped = false
+    /// Bumped on every manual toggle, so a stale "manual off" task never
+    /// closes a session started by a later toggle.
+    private var manualGeneration = 0
     private var poll: Timer?
     private var purgeTimer: Timer?
+    private var autoModeObservation: AnyCancellable?
 
     init(settings: Settings, transcriber: any Transcriber, directory: URL = MeetingPaths.defaultDirectory) {
         self.settings = settings
         self.transcriber = transcriber
         self.writer = MeetingWriter(directory: directory)
         self.library = MeetingLibrary(directory: directory)
+        // Switching auto on is, like turning manual on, the user's way to
+        // retry after granting the permission a problem asked for.
+        autoModeObservation = settings.$meetingAutoMode
+            .dropFirst()
+            .removeDuplicates()
+            .filter { $0 }
+            .sink { [weak self] _ in self?.clearProblems() }
     }
 
     /// Begins polling. Idempotent.
@@ -96,12 +107,10 @@ final class MeetingController: ObservableObject {
     func toggleManual() {
         guard !stopped else { return }
         manualOn.toggle()
+        manualGeneration += 1
         if manualOn {
             // Turning it on is also the user's way to retry after a problem.
-            problem = nil
-            tapBlocked = false
-            tapRetryAfter = .distantPast
-            micRetryAfter = .distantPast
+            clearProblems()
             apply(tracker.finish())
             tracker.mode = .manual
             refresh()
@@ -110,13 +119,21 @@ final class MeetingController: ObservableObject {
             // Close the manual session only once the retired channels have
             // delivered their last lines, so those don't open a new session.
             let pending = Array(finishing.values)
+            let generation = manualGeneration
             Task {
                 for task in pending { await task.value }
-                guard !self.manualOn, !self.stopped else { return }
+                guard self.manualGeneration == generation, !self.stopped else { return }
                 self.apply(self.tracker.finish())
                 self.tracker.mode = .auto
             }
         }
+    }
+
+    private func clearProblems() {
+        problem = nil
+        tapBlocked = false
+        tapRetryAfter = .distantPast
+        micRetryAfter = .distantPast
     }
 
     /// Dictation started or stopped. Re-plans immediately (without

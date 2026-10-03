@@ -233,10 +233,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        // Dictation has priority over the meeting mic, and `DictationSession`
+        // starts its recorder before it leaves `.idle` — so the `$state`
+        // observation fires too late. Release the meeting mic here, first.
+        let starting = wouldStartRecording(gesture)
+        if starting { meetings.dictationChanged(isDictating: true) }
+
         switch gesture {
         case .tap: session.toggle(proofread: proofread)
         case .holdStart: session.begin(proofread: proofread)
         case .holdEnd: session.end()
+        }
+
+        // Refused (no microphone access) or still awaiting a permission
+        // prompt: nothing is recording, so hand the mic back. If the prompt
+        // later grants access, the `$state` observation re-plans again.
+        if starting && session.state == .idle {
+            meetings.dictationChanged(isDictating: false)
         }
     }
 

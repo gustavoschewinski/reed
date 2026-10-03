@@ -96,3 +96,7 @@ private func inputs(manual: Bool = false, auto: Bool = false, available: Bool = 
 @Test func withoutSystemAudioManualIsMicOnly() {
     #expect(MeetingPlanner.plan(inputs(manual: true, available: false)) == CapturePlan(systemTap: false, mic: true))
 }
+
+@Test func autoOpensTheMicForACallEvenWithNothingPlaying() {
+    #expect(MeetingPlanner.plan(inputs(auto: true, call: true)) == CapturePlan(systemTap: false, mic: true))
+}
