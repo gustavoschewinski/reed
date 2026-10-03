@@ -93,11 +93,4 @@ private func frame(_ v: Float, _ n: Int = 4) -> [Float] { Array(repeating: v, co
     // First segment should contain [1,1,1,1,0,0,0,0], second should contain [2,2,2,2,0,0,0,0].
     #expect(allSegments[0].samples == frame(1) + frame(0))
     #expect(allSegments[1].samples == frame(2) + frame(0))
-
-    // Verify no frame value appears in both segments (no reuse).
-    let firstValues = Set(allSegments[0].samples)
-    let secondValues = Set(allSegments[1].samples)
-    #expect(firstValues.intersection(secondValues).isEmpty == false)  // They both have 0.0 (tail), which is okay
-    // But frame(0) from first tail should not be the same as frame(1) or frame(2) pre-roll
-    #expect(!allSegments[1].samples.starts(with: allSegments[0].samples.suffix(4)))
 }
