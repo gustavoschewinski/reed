@@ -43,8 +43,10 @@ actor MeetingChannel {
         var capturedAt: Date
     }
 
-    /// Worst-case chunk is 10 ms of audio, so 12_000 chunks is ~120 s of
-    /// backlog before the oldest audio is dropped.
+    /// A bound on chunks, not seconds: chunk length is set by the hardware.
+    /// Mic chunks are ~85 ms (12_000 is ~17 min of backlog); system tap
+    /// chunks follow the output device's I/O buffer, ~10 ms at the usual
+    /// 512 frames (~2 min), shorter if another app shrinks that buffer.
     private static let maxBufferedChunks = 12_000
     private static let reanchorThreshold: TimeInterval = 1
 
@@ -136,16 +138,22 @@ actor MeetingChannel {
     }
 
     private func process(frame: [Float]) async {
-        let speech: Bool
+        // Digital silence (nothing playing, or a tap without permission) is
+        // never speech; skip Silero rather than run it on zeros all day.
+        let speech = frame.allSatisfy({ $0 == 0 }) ? false : await detectSpeech(frame)
+        await emit(segmenter.push(frame: frame, isSpeech: speech))
+    }
+
+    private func detectSpeech(_ frame: [Float]) async -> Bool {
         do {
-            speech = try await detector.isSpeech(frame)
+            let speech = try await detector.isSpeech(frame)
             vadFailing = false
+            return speech
         } catch {
             if !vadFailing { NSLog("Reed meeting (%@): speech detection failed: %@", "\(speaker)", "\(error)") }
             vadFailing = true
-            speech = false
+            return false
         }
-        await emit(segmenter.push(frame: frame, isSpeech: speech))
     }
 
     private func emit(_ segments: [SpeechSegment]) async {

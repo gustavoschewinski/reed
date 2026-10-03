@@ -228,6 +228,22 @@ final class Recorder {
         channels: 1, interleaved: false
     )!
 
+    /// Calls `handler` on the main queue when the engine stops itself
+    /// because the audio hardware changed (a device came or went, or the
+    /// default changed). Meeting capture uses it to rebuild; dictation
+    /// doesn't observe it. Pass the token to `NotificationCenter.removeObserver`.
+    func observeConfigurationChange(_ handler: @escaping @MainActor @Sendable () -> Void) -> NSObjectProtocol {
+        NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
+        ) { note in
+            // Voice processing can post this while the engine keeps running;
+            // only an engine that stopped needs rebuilding.
+            let stopped = (note.object as? AVAudioEngine)?.isRunning == false
+            guard stopped else { return }
+            MainActor.assumeIsolated { handler() }
+        }
+    }
+
     func start(deviceID: AudioDeviceID? = nil) throws {
         DebugLog.log("Recorder.start() entry, deviceID=\(deviceID.map(String.init(describing:)) ?? "default")")
         buffer.reset()

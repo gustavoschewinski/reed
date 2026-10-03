@@ -7,6 +7,17 @@ private final class FakeDetector: SpeechDetector, @unchecked Sendable {
     func isSpeech(_ frame: [Float]) async throws -> Bool { frame.first ?? 0 > 0 }
 }
 
+/// Counts how often VAD actually runs.
+private final class CountingDetector: SpeechDetector, @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    var calls: Int { lock.withLock { count } }
+    func isSpeech(_ frame: [Float]) async throws -> Bool {
+        lock.withLock { count += 1 }
+        return frame.first ?? 0 > 0
+    }
+}
+
 private struct FakeTranscriber: Transcriber {
     var fail = false
     func prepare() async throws {}
@@ -88,4 +99,16 @@ private func makeChannel(_ speaker: Speaker, _ transcriber: FakeTranscriber, _ c
     let outputs = await sink.outputs
     #expect(outputs.count == 1)
     #expect(outputs.first?.line.kind == .speech(.me, "fala 4"))
+}
+
+@Test func digitalSilenceSkipsSpeechDetection() async {
+    let sink = Sink(), clock = TestClock(t0), detector = CountingDetector()
+    let channel = MeetingChannel(speaker: .others, detector: detector, transcriber: FakeTranscriber(),
+                                 frameSize: 4, sampleRate: 4, clock: { clock.read() }, onOutput: { await sink.add($0) })
+    for i in 1...10 { clock.set(t0.addingTimeInterval(Double(i))); channel.feed([0, 0, 0, 0]) }
+    clock.set(t0.addingTimeInterval(11)); channel.feed([0.001, 0, 0, 0])  // quiet but not digital silence
+    clock.set(t0.addingTimeInterval(12)); channel.feed([1, 1, 1, 1])
+    await channel.finish()
+    #expect(detector.calls == 2)
+    #expect(await sink.outputs.count == 1)
 }
