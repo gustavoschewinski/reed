@@ -46,7 +46,38 @@ private func toolText(_ response: [String: Any]) -> String? {
 }
 
 @Test func getMeetingWithATraversalIdIsAToolError() throws {
-    let r = try call(try server(), #"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"get_meeting","arguments":{"id":"../../etc/passwd"}}}"#)
+    // Create a parent directory with a secret meeting file outside the meetings dir
+    let parentDir = FileManager.default.temporaryDirectory.appendingPathComponent("reed-mcp-parent-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: parentDir, withIntermediateDirectories: true)
+    let meetingsDir = parentDir.appendingPathComponent("meetings")
+
+    // Write a secret file at the parent level (as .md so the library can find it)
+    let secretPath = parentDir.appendingPathComponent("secret.md")
+    let secretContent = "SECRET-\(UUID().uuidString)"
+    try secretContent.write(toFile: secretPath.path, atomically: true, encoding: .utf8)
+
+    // Create a valid meeting inside meetingsDir
+    let writer = MeetingWriter(directory: meetingsDir, format: MeetingFormat(timeZone: utc))
+    let h = MeetingHeader(started: t0, ended: t0.addingTimeInterval(1800), source: MeetingSource(app: "Zoom"), mode: .auto)
+    try writer.apply([.open(h), .append([MeetingLine(time: t0, kind: .speech(.others, "safe content"))], ended: h.ended), .close])
+
+    let server = MCPServer(library: MeetingLibrary(directory: meetingsDir, format: MeetingFormat(timeZone: utc)),
+                          now: { t0.addingTimeInterval(3 * 3600) }, timeZone: utc)
+
+    // Test traversal with ../ — should fail without exposing secret
+    var r = try call(server, #"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"get_meeting","arguments":{"id":"../secret"}}}"#)
+    let text = toolText(r)
+    #expect((r["result"] as? [String: Any])?["isError"] as? Bool == true)
+    #expect(text?.contains(secretContent) == false, "Response must not contain secret from parent directory")
+
+    // Test other dangerous IDs
+    r = try call(server, #"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"get_meeting","arguments":{"id":".."}}}"#)
+    #expect((r["result"] as? [String: Any])?["isError"] as? Bool == true)
+
+    r = try call(server, #"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"get_meeting","arguments":{"id":".hidden"}}}"#)
+    #expect((r["result"] as? [String: Any])?["isError"] as? Bool == true)
+
+    r = try call(server, #"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"get_meeting","arguments":{"id":"a/b"}}}"#)
     #expect((r["result"] as? [String: Any])?["isError"] as? Bool == true)
 }
 
@@ -58,6 +89,14 @@ private func toolText(_ response: [String: Any]) -> String? {
 @Test func listMeetingsForADate() throws {
     let r = try call(try server(), #"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"list_meetings","arguments":{"date":"2026-10-02"}}}"#)
     #expect(toolText(r)?.contains("Zoom") == true)
+}
+
+@Test func listMeetingsWithInvalidDateReturnsError() throws {
+    let r = try call(try server(), #"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"list_meetings","arguments":{"since":"yesterday"}}}"#)
+    #expect((r["result"] as? [String: Any])?["isError"] as? Bool == true)
+    let text = toolText(r)
+    #expect(text?.contains("Invalid") == true)
+    #expect(text?.contains("since") == true)
 }
 
 @Test func unknownMethodAndBadJSON() throws {

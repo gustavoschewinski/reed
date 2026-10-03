@@ -58,12 +58,31 @@ public struct MCPServer: Sendable {
     private func callTool(_ name: String, _ args: [String: Any]) -> Result<String, ToolError> {
         switch name {
         case "list_meetings":
-            var since = (args["since"] as? String).flatMap(parseTime)
-            var until = (args["until"] as? String).flatMap(parseTime)
-            if let day = (args["date"] as? String).flatMap(parseDay) {
-                since = day
-                until = day.addingTimeInterval(86_400)
+            var since: Date? = nil
+            var until: Date? = nil
+
+            // Validate and parse date/since/until with proper error messages
+            if let dateStr = args["date"] as? String {
+                guard let parsed = parseDay(dateStr) else {
+                    return .failure(ToolError(message: "Invalid `date`: \(dateStr). Expected format: YYYY-MM-DD."))
+                }
+                since = parsed
+                until = parsed.addingTimeInterval(86_400)
+            } else {
+                if let sinceStr = args["since"] as? String {
+                    guard let parsed = parseTime(sinceStr) else {
+                        return .failure(ToolError(message: "Invalid `since`: \(sinceStr). Expected format: ISO 8601 or HH:mm."))
+                    }
+                    since = parsed
+                }
+                if let untilStr = args["until"] as? String {
+                    guard let parsed = parseTime(untilStr) else {
+                        return .failure(ToolError(message: "Invalid `until`: \(untilStr). Expected format: ISO 8601 or HH:mm."))
+                    }
+                    until = parsed
+                }
             }
+
             let meetings = library.list(since: since, until: until)
             guard !meetings.isEmpty else { return .success("No meetings found.") }
             return .success(meetings.map(describe).joined(separator: "\n"))
@@ -124,31 +143,33 @@ public struct MCPServer: Sendable {
         return String(decoding: data, as: UTF8.self)
     }
 
-    private nonisolated(unsafe) static let tools: [[String: Any]] = [
+    private static var tools: [[String: Any]] {
         [
-            "name": "list_meetings",
-            "description": "List recorded meetings/sessions, newest first, with id, local start–end time, source app/title and mode.",
-            "inputSchema": ["type": "object", "properties": [
-                "date": ["type": "string", "description": "YYYY-MM-DD, local time"],
-                "since": ["type": "string", "description": "ISO 8601 or HH:mm today"],
-                "until": ["type": "string", "description": "ISO 8601 or HH:mm today"],
-            ]],
-        ],
-        [
-            "name": "get_meeting",
-            "description": "Full transcript of one meeting, by id or by a time it covered (e.g. \"14:00\" for the meeting at 2pm today).",
-            "inputSchema": ["type": "object", "properties": [
-                "id": ["type": "string"],
-                "at": ["type": "string", "description": "HH:mm today, or ISO 8601"],
-            ]],
-        ],
-        [
-            "name": "search",
-            "description": "Find lines across recent meetings (case- and accent-insensitive).",
-            "inputSchema": ["type": "object", "required": ["query"], "properties": [
-                "query": ["type": "string"],
-                "days": ["type": "integer", "description": "How far back, default 7"],
-            ]],
-        ],
-    ]
+            [
+                "name": "list_meetings",
+                "description": "List recorded meetings/sessions, newest first, with id, local start–end time, source app/title and mode.",
+                "inputSchema": ["type": "object", "properties": [
+                    "date": ["type": "string", "description": "YYYY-MM-DD, local time"],
+                    "since": ["type": "string", "description": "ISO 8601 or HH:mm today"],
+                    "until": ["type": "string", "description": "ISO 8601 or HH:mm today"],
+                ]],
+            ],
+            [
+                "name": "get_meeting",
+                "description": "Full transcript of one meeting, by id or by a time it covered (e.g. \"14:00\" for the meeting at 2pm today).",
+                "inputSchema": ["type": "object", "properties": [
+                    "id": ["type": "string"],
+                    "at": ["type": "string", "description": "HH:mm today, or ISO 8601"],
+                ]],
+            ],
+            [
+                "name": "search",
+                "description": "Find lines across recent meetings (case- and accent-insensitive).",
+                "inputSchema": ["type": "object", "required": ["query"], "properties": [
+                    "query": ["type": "string"],
+                    "days": ["type": "integer", "description": "How far back, default 7"],
+                ]],
+            ],
+        ]
+    }
 }
