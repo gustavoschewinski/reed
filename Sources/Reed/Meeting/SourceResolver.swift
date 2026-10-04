@@ -27,7 +27,7 @@ enum SourceResolver {
         "Cisco-Systems.Spark", "com.cisco.webexmeetingsapp",
     ]
     static let browsers: Set<String> = [
-        "com.google.Chrome", "com.apple.Safari", "company.thebrowser.Browser", "org.mozilla.firefox",
+        "com.google.Chrome", "com.apple.Safari", "company.thebrowser.Browser", "company.thebrowser.dia", "org.mozilla.firefox",
         "com.microsoft.edgemac", "com.brave.Browser", "com.operasoftware.Opera", "com.vivaldi.Vivaldi",
     ]
     /// Window titles worth naming a session after. Anything else (Gmail,

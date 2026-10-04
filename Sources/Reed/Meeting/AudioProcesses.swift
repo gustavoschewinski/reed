@@ -17,7 +17,8 @@ enum AudioProcesses {
             else { return nil }
             let out: UInt32 = CoreAudioProperty.value(id, kAudioProcessPropertyIsRunningOutput) ?? 0
             let input: UInt32 = CoreAudioProperty.value(id, kAudioProcessPropertyIsRunningInput) ?? 0
-            return AudioProcess(pid: pid, bundleID: bundle, isRunningOutput: out != 0, isRunningInput: input != 0)
+            let owner = AppInfo.owningAppBundleID(pid: pid) ?? bundle
+            return AudioProcess(pid: pid, bundleID: owner, isRunningOutput: out != 0, isRunningInput: input != 0)
         }
     }
 
@@ -88,6 +89,30 @@ enum AppInfo {
     /// or agent that happens to hold an audio device.
     static func isUserApp(bundleID: String) -> Bool {
         app(bundleID)?.activationPolicy == .regular
+    }
+
+    /// The app a process belongs to: itself, or the app that launched it.
+    /// Browser audio helpers report a bundle ID that names no running app
+    /// (Dia's says Arc's `company.thebrowser.browser.helper`), so asking the
+    /// parent process is what ties them to the browser the user sees. `nil`
+    /// for XPC services launched by launchd (Safari's WebKit), which fall
+    /// back to `SourceResolver.canonicalBundleID`.
+    static func owningAppBundleID(pid: pid_t) -> String? {
+        for candidate in [pid, parentPID(of: pid)].compactMap({ $0 }) {
+            if let app = NSRunningApplication(processIdentifier: candidate), app.activationPolicy == .regular {
+                return app.bundleIdentifier
+            }
+        }
+        return nil
+    }
+
+    private static func parentPID(of pid: pid_t) -> pid_t? {
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        guard sysctl(&mib, u_int(mib.count), &info, &size, nil, 0) == 0, size > 0 else { return nil }
+        let parent = info.kp_eproc.e_ppid
+        return parent > 1 ? parent : nil
     }
 
     /// Case-insensitive: helper processes don't always report the app's

@@ -70,6 +70,12 @@ private func resolve(_ ps: [AudioProcess], titles: [String: String] = [:]) -> Re
     #expect(r.output == MeetingSource(app: "company.thebrowser.browser", title: "Talk - YouTube"))
 }
 
+@Test func diaIsABrowserSoAMeetTabNamesTheCall() {
+    let r = resolve([p("company.thebrowser.dia", out: true, input: true)],
+                    titles: ["company.thebrowser.dia": "Meet - abc-defg-hij"])
+    #expect(r.call == MeetingSource(app: "company.thebrowser.dia", title: "Meet - abc-defg-hij"))
+}
+
 @Test func displayNamesDropInvisibleFormattingCharacters() {
     // WhatsApp's localized name starts with a left-to-right mark (U+200E).
     #expect(SourceResolver.displayName("\u{200E}WhatsApp") == "WhatsApp")
