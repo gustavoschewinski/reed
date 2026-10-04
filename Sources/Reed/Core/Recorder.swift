@@ -208,6 +208,18 @@ final class Recorder {
 
     private let engine = AVAudioEngine()
     private let buffer = SampleBuffer()
+    /// Dictation needs the whole recording back from `stop()`; meeting
+    /// capture streams for hours and must not accumulate it.
+    private let keepsRecording: Bool
+    /// Echo cancellation for meeting capture without headphones: removes
+    /// what the speakers play from the mic signal, so the other side of a
+    /// call isn't transcribed twice. Off for dictation.
+    private let voiceProcessing: Bool
+
+    init(keepsRecording: Bool = true, voiceProcessing: Bool = false) {
+        self.keepsRecording = keepsRecording
+        self.voiceProcessing = voiceProcessing
+    }
     /// Lives for one recording: created in `start()` against the input
     /// format the microphone actually negotiated, drained in `stop()`.
     private var resampler: StreamingResampler?
@@ -216,9 +228,35 @@ final class Recorder {
         channels: 1, interleaved: false
     )!
 
+    /// Calls `handler` on the main queue when the engine stops itself
+    /// because the audio hardware changed (a device came or went, or the
+    /// default changed). Meeting capture uses it to rebuild; dictation
+    /// doesn't observe it. Pass the token to `NotificationCenter.removeObserver`.
+    func observeConfigurationChange(_ handler: @escaping @MainActor @Sendable () -> Void) -> NSObjectProtocol {
+        NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
+        ) { note in
+            // Voice processing can post this while the engine keeps running;
+            // only an engine that stopped needs rebuilding.
+            let stopped = (note.object as? AVAudioEngine)?.isRunning == false
+            guard stopped else { return }
+            MainActor.assumeIsolated { handler() }
+        }
+    }
+
     func start(deviceID: AudioDeviceID? = nil) throws {
         DebugLog.log("Recorder.start() entry, deviceID=\(deviceID.map(String.init(describing:)) ?? "default")")
         buffer.reset()
+
+        // Before the explicit device: enabling voice processing swaps the
+        // input unit and can drop a device chosen earlier.
+        if voiceProcessing {
+            try engine.inputNode.setVoiceProcessingEnabled(true)
+            // Default ducking lowers every other app while the mic is open —
+            // exactly wrong during a call the user is listening to.
+            engine.inputNode.voiceProcessingOtherAudioDuckingConfiguration =
+                AVAudioVoiceProcessingOtherAudioDuckingConfiguration(enableAdvancedDucking: false, duckingLevel: .min)
+        }
 
         if let deviceID {
             var id = deviceID
@@ -279,6 +317,7 @@ final class Recorder {
         }
         self.resampler = resampler
         let buffer = self.buffer
+        let keepsRecording = self.keepsRecording
 
         // Re-read immediately before the install, not reused from above: the
         // default input device can change between the two — a headset
@@ -323,7 +362,7 @@ final class Recorder {
             // returns. Once `stop()`'s `engine.stop()` call returns, the render thread
             // cannot be mid-callback, so no further appends are possible and `drain()`
             // is guaranteed to see every sample.
-            buffer.append(samples)
+            if keepsRecording { buffer.append(samples) }
 
             let level = AudioMath.rms(samples)
             // DispatchQueue.main.async is FIFO by contract, unlike separately-created

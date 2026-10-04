@@ -12,6 +12,11 @@ rm -rf "$APP"
 mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources"
 
 cp "$BIN/Reed" "$CONTENTS/MacOS/Reed"
+
+# reed-mcp: the read-only MCP server for meeting transcripts. Lives next to
+# Reed so `claude mcp add` can point at a path that moves with the app.
+cp "$BIN/ReedMCP" "$CONTENTS/MacOS/reed-mcp"
+
 cp "$ROOT/Resources/Info.plist" "$CONTENTS/Info.plist"
 
 # The version in the bundle comes from the tag being built, not from the

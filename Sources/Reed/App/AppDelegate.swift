@@ -35,6 +35,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// timing — see `HotkeyMonitor`'s doc comment.
     private let proofreadHotkeyMonitor = HotkeyMonitor(name: .proofread)
     private var stateObservation: AnyCancellable?
+
+    /// Meeting mode. Always constructed (Settings needs it), but only
+    /// started — polling, its shortcut, the dictation observation — once
+    /// onboarding is complete; see `startMeetingsIfReady()`.
+    private let meetings: MeetingController
+    private var meetingsStarted = false
+    private var meetingStateObservation: AnyCancellable?
+    /// Drives the status-item icon from meeting state. Only the image and
+    /// tint change; click handling is untouched.
+    private var meetingIndicator: AnyCancellable?
+    /// Set once quitting has waited for meeting mode to close its transcript.
+    private var meetingsShutDown = false
     /// Global escape monitor (Item 3): `OverlayPanel` can never become key
     /// (see its own doc comment — the synthetic ⌘V a paste depends on would
     /// otherwise land in the overlay instead of the app being dictated
@@ -97,6 +109,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             store: store,
             settings: settings
         )
+        self.meetings = MeetingController(settings: settings, transcriber: transcriber)
         super.init()
     }
 
@@ -116,6 +129,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         item.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
 
         statusItem = item
+
+        // A meeting problem (a transcript that can't be saved, audio that
+        // can't be heard) tints the icon orange so it is seen outside
+        // Settings; the menu spells it out.
+        meetingIndicator = meetings.$isCapturing
+            .combineLatest(meetings.$manualOn, meetings.$problem)
+            .sink { [weak self] capturing, manual, problem in
+                let symbol = manual ? "record.circle" : (capturing ? "waveform.badge.mic" : "waveform")
+                self?.statusItem?.button?.image = NSImage(
+                    systemSymbolName: symbol, accessibilityDescription: "Reed"
+                )
+                self?.statusItem?.button?.contentTintColor =
+                    problem != nil ? .systemOrange : (manual ? .systemRed : nil)
+            }
 
         // `DictationSession` never touches UI (Ruling 2) — this is the one
         // place that watches its state and shows or hides the overlay.
@@ -169,6 +196,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // if a real dictation gets there first anyway.
             warmModel()
         }
+        startMeetingsIfReady()
+    }
+
+    /// Starts meeting mode once onboarding is done (mic permission and the
+    /// speech model are in place). Called at launch and when onboarding
+    /// finishes; idempotent.
+    private func startMeetingsIfReady() {
+        guard settings.hasCompletedOnboarding, !meetingsStarted else { return }
+        meetingsStarted = true
+        meetings.start()
+        KeyboardShortcuts.onKeyDown(for: .meeting) { [weak self] in self?.meetings.toggleManual() }
+        // The value from the publisher, not `session.state`: `@Published`
+        // emits before the property is updated.
+        meetingStateObservation = session.$state
+            .map { $0 != .idle }
+            .removeDuplicates()
+            .sink { [weak self] dictating in self?.meetings.dictationChanged(isDictating: dictating) }
     }
 
     /// Both shortcuts land here; `proofread` is the only difference
@@ -206,10 +250,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        // Dictation has priority over the meeting mic, and `DictationSession`
+        // starts its recorder before it leaves `.idle` — so the `$state`
+        // observation fires too late. Release the meeting mic here, first.
+        let starting = wouldStartRecording(gesture)
+        if starting { meetings.dictationChanged(isDictating: true) }
+
         switch gesture {
         case .tap: session.toggle(proofread: proofread)
         case .holdStart: session.begin(proofread: proofread)
         case .holdEnd: session.end()
+        }
+
+        // Refused (no microphone access) or still awaiting a permission
+        // prompt: nothing is recording, so hand the mic back. If the prompt
+        // later grants access, the `$state` observation re-plans again.
+        if starting && session.state == .idle {
+            meetings.dictationChanged(isDictating: false)
         }
     }
 
@@ -251,6 +308,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             showOnboardingWindow()
         }
         return true
+    }
+
+    /// Meeting mode gets up to 2 s to transcribe what it still holds and
+    /// close its transcript; past that the last chunk is lost, which the
+    /// spec accepts ("a crash loses at most one chunk"). Deferred
+    /// termination rather than blocking in `applicationWillTerminate`:
+    /// `shutdown()` needs the main actor, so a blocking wait there would
+    /// deadlock until the timeout.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard !meetingsShutDown else { return .terminateNow }
+        var replied = false
+        let reply = { [weak self] in
+            guard !replied else { return }
+            replied = true
+            self?.meetingsShutDown = true
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        Task { [meetings] in
+            await meetings.shutdown()
+            reply()
+        }
+        Task {
+            try? await Task.sleep(for: .seconds(2))
+            reply()
+        }
+        return .terminateLater
     }
 
     /// Item 1 (ship blocker): the one code path that runs on a normal Quit
@@ -350,6 +433,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func buildMenu() -> NSMenu {
         let menu = NSMenu()
+        // The `isEnabled` values below are the source of truth; automatic
+        // validation would enable any item whose target responds.
+        menu.autoenablesItems = false
 
         let start = NSMenuItem(
             title: startDictationTitle, action: #selector(startDictationFromMenu), keyEquivalent: ""
@@ -366,6 +452,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         open.target = self
         menu.addItem(open)
+
+        let meeting = NSMenuItem(
+            title: meetings.manualOn ? "Stop Meeting" : "Start Meeting",
+            action: #selector(toggleMeetingFromMenu), keyEquivalent: ""
+        )
+        meeting.target = self
+        // Meeting mode starts only once onboarding is done.
+        meeting.isEnabled = settings.hasCompletedOnboarding
+        menu.addItem(meeting)
+
+        if let problem = meetings.problem {
+            let notice = NSMenuItem(title: problem, action: nil, keyEquivalent: "")
+            notice.isEnabled = false
+            menu.addItem(notice)
+        }
 
         menu.addItem(.separator())
 
@@ -384,6 +485,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
 
         return menu
+    }
+
+    @objc private func toggleMeetingFromMenu() {
+        meetings.toggleManual()
     }
 
     @objc private func startDictationFromMenu() {
@@ -450,7 +555,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // makes it follow the system light/dark appearance, unlike the
             // always-dark overlay — see `Theme.Window`.
             window.contentView = NSHostingView(
-                rootView: MainWindowView(store: store, settings: settings, state: mainWindowState)
+                rootView: MainWindowView(
+                    store: store, settings: settings, meetings: meetings, state: mainWindowState
+                )
             )
 
             // Must happen before `makeKeyAndOrderFront` — an `.accessory`
@@ -553,6 +660,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             },
             finish: { [weak self] in
                 self?.settings.hasCompletedOnboarding = true
+                self?.startMeetingsIfReady()
                 self?.onboardingWindow?.close()
                 self?.onboardingWindow = nil
             }

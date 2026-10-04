@@ -2,6 +2,7 @@ import AVFoundation
 import AppKit
 import CoreAudio
 import KeyboardShortcuts
+import MeetingLog
 import SwiftUI
 
 /// The main window's third tab. Originally exactly six controls and
@@ -34,6 +35,7 @@ import SwiftUI
 @MainActor
 struct SettingsView: View {
     @ObservedObject var settings: Settings
+    @ObservedObject var meetings: MeetingController
 
     @State private var devices: [AudioInputDevice] = []
     @State private var launchAtLogin = LaunchAtLogin.isEnabled
@@ -186,6 +188,74 @@ struct SettingsView: View {
                         .labelsHidden()
                         .accessibilityLabel("What it may change")
                         .frame(width: controlWidth)
+                    }
+                }
+
+                group("Meetings") {
+                    Field(
+                        title: "Meeting shortcut",
+                        note: "Starts and stops recording a meeting: your microphone and what your Mac plays, "
+                            + "transcribed on this Mac. Audio is never saved, only the text."
+                    ) {
+                        KeyboardShortcuts.Recorder(for: .meeting)
+                    }
+                    Rule()
+                    Field(
+                        title: "Listen automatically",
+                        note: "Transcribes speech your Mac plays, and joins your microphone only while another app "
+                            + "is using it (a call). Silence and music are skipped."
+                    ) {
+                        Toggle("", isOn: $settings.meetingAutoMode)
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                            .accessibilityLabel("Listen automatically")
+                    }
+                    Rule()
+                    Field(
+                        title: "Keep transcripts for",
+                        note: "Older transcripts are deleted automatically. Forever keeps them until you delete them."
+                    ) {
+                        Picker("", selection: $settings.meetingRetentionDays) {
+                            Text("1 day").tag(1)
+                            Text("7 days").tag(7)
+                            Text("30 days").tag(30)
+                            Text("Forever").tag(0)
+                        }
+                        .labelsHidden()
+                        .accessibilityLabel("Keep transcripts for")
+                        .frame(width: controlWidth)
+                    }
+                    Rule()
+                    Field(
+                        title: "Use with Claude",
+                        note: "Lets Claude read your meetings, e.g. \"summarize my 2pm meeting\"."
+                    ) {
+                        HStack {
+                            Button("Copy MCP command") {
+                                let path = Bundle.main.bundleURL
+                                    .appendingPathComponent("Contents/MacOS/reed-mcp").path
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(
+                                    "claude mcp add reed -- \"\(path)\"", forType: .string
+                                )
+                            }
+                            Button("Open folder") {
+                                do {
+                                    try FileManager.default.createDirectory(
+                                        at: MeetingPaths.defaultDirectory,
+                                        withIntermediateDirectories: true,
+                                        attributes: [.posixPermissions: 0o700]
+                                    )
+                                } catch {
+                                    NSLog("Reed: could not create the meetings folder: \(error)")
+                                }
+                                NSWorkspace.shared.open(MeetingPaths.defaultDirectory)
+                            }
+                        }
+                    }
+                    if let problem = meetings.problem {
+                        Rule()
+                        Text(problem).foregroundStyle(Theme.Window.live)
                     }
                 }
 

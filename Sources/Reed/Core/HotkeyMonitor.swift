@@ -9,6 +9,8 @@ extension KeyboardShortcuts.Name {
     /// shortcut that needs an API key to do anything shouldn't be occupying
     /// a key combination for people who will never set one up.
     static let proofread = Self("proofread")
+    /// Meeting mode on/off. A plain toggle, so it needs no `HotkeyMonitor`.
+    static let meeting = Self("meeting", default: .init(.minus, modifiers: [.option]))
 }
 
 extension Notification.Name {
