@@ -25,6 +25,12 @@ All on your Mac. Nothing leaves it.
 
 Grab the DMG from [**Releases**](https://github.com/gustavoschewinski/reed/releases), open it, drag Reed to Applications. Apple silicon, macOS 14+.
 
+If macOS says Reed is damaged or can't be opened (the build isn't notarized), clear the quarantine flag once after copying it to Applications:
+
+```bash
+sudo xattr -dr com.apple.quarantine /Applications/Reed.app
+```
+
 A Homebrew cask lives in [`Casks/reed.rb`](Casks/reed.rb), but the tap isn't published yet, so use the DMG for now.
 
 ## First run
