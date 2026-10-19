@@ -18,6 +18,7 @@ All on your Mac. Nothing leaves it.
 
 - 🎙️ **On-device dictation.** 25 languages, auto-detected. ~23× real time on an M3.
 - ✍️ **Optional proofreading.** A second shortcut that fixes the typos before pasting.
+- 🗒️ **Meeting mode.** One shortcut transcribes a meeting, yours and theirs, to a text file Claude can read.
 - 🔒 **Private by default.** Audio is never written to disk and never sent anywhere.
 
 ## Install
@@ -28,22 +29,23 @@ A Homebrew cask lives in [`Casks/reed.rb`](Casks/reed.rb), but the tap isn't pub
 
 ## First run
 
-Reed asks for two permissions, downloads its speech model (~600 MB, with a real progress bar), and compiles it for the Neural Engine (about 20 seconds, once). Then you pick a shortcut and you're dictating. None of it repeats on later launches.
+Reed asks for two permissions (Microphone and Accessibility), downloads its speech models (~600 MB, with a real progress bar), and compiles the main one for the Neural Engine (about 20 seconds, once). Then you pick a shortcut and you're dictating. None of it repeats on later launches. A third, System Audio Recording, is asked for only when meeting mode first captures your Mac's audio.
 
 | Permission | Why |
 | --- | --- |
-| 🎤 **Microphone** | To hear you. Audio is captured only while you're actively dictating. |
+| 🎤 **Microphone** | To hear you. Audio is captured only while you're dictating, or while meeting mode is recording. |
 | ⌨️ **Accessibility** | So Reed can paste into the app you're in, instead of leaving the text on the clipboard. |
+| 🔊 **System Audio Recording** | Only for meeting mode, to hear the other side of a call. |
 
 Reed does **not** need Input Monitoring.
 
 ## Privacy
 
-Transcription runs on-device with NVIDIA's Parakeet TDT v3 on the Neural Engine. **Nothing you say leaves your Mac.** Audio is thrown away the moment transcription finishes and is never written to disk. Only the resulting text is kept, in your local history.
+Transcription runs on-device with NVIDIA's Parakeet TDT v3 on the Neural Engine. **Nothing you say leaves your Mac.** Audio is thrown away the moment transcription finishes and is never written to disk. Only the resulting text is kept, in your local history. Meeting transcripts are kept as text files in `~/Library/Application Support/Reed/Meetings`, for 7 days by default.
 
 Reed makes exactly two kinds of network request:
 
-1. The one-time model download on first run.
+1. The one-time model download on first run (the speech model, plus the small Silero voice-activity model meeting mode uses).
 2. If, and only if, you set up [proofreading](#proofreading), that shortcut sends the transcribed **text** (never the audio) to OpenAI.
 
 Plain dictation never touches the network, whether or not proofreading is configured.
@@ -66,6 +68,24 @@ Your API key goes in the macOS Keychain, not in Reed's preferences file. Until b
 Either way the prompt leaves technical writing alone: `merge`, `rebase`, `deploy`, `staging`, `PR`, file paths, code identifiers and URLs are treated as already correct. It never translates, so a message that mixes languages stays mixed. And it treats what you dictated as text to proofread, not as instructions. Dictating *"write an email to the client explaining the delay"* gets you that sentence, corrected, not an email.
 
 If the proofread fails (no network, a rejected key, a model that doesn't exist), Reed pastes the raw transcription anyway and says what happened in the pill. **A proofread that didn't work never costs you the words you spoke.**
+
+## Meetings
+
+Press the meeting shortcut (**Option+-** by default) and Reed transcribes your microphone and whatever your Mac is playing, so both sides of a call end up in one text file. Press it again to stop. Audio is never saved, only the text, and it all happens on your Mac. Change the shortcut in **Settings → Meetings**.
+
+**Listen automatically** is off by default. When it's on, Reed transcribes speech your Mac plays, and joins your microphone only while another app is using it (a call). Silence and music are skipped. The menu bar icon turns red while you've started a meeting yourself.
+
+Transcripts are kept for 7 days by default. Pick 1 day, 30 days or forever in settings.
+
+To let Claude read your meetings, add Reed as an MCP server:
+
+```bash
+claude mcp add reed -- /Applications/Reed.app/Contents/MacOS/reed-mcp
+```
+
+It's read-only and gives Claude three tools: `list_meetings`, `get_meeting` and `search`. Then ask things like "summarize my 2pm meeting". **Copy MCP command** in settings copies this line with the right path.
+
+Telling people they're being transcribed, where that's required, is your responsibility.
 
 ## Troubleshooting
 

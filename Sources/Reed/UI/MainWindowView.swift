@@ -46,6 +46,7 @@ final class MainWindowState: ObservableObject {
 struct MainWindowView: View {
     @ObservedObject var store: TranscriptStore
     @ObservedObject var settings: Settings
+    @ObservedObject var meetings: MeetingController
     @ObservedObject var state: MainWindowState
 
     var body: some View {
@@ -121,7 +122,7 @@ struct MainWindowView: View {
                 switch state.selectedTab {
                 case .dashboard: DashboardView(store: store)
                 case .history: HistoryView(store: store)
-                case .settings: SettingsView(settings: settings)
+                case .settings: SettingsView(settings: settings, meetings: meetings)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)

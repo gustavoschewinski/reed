@@ -33,6 +33,8 @@ final class Settings: ObservableObject {
         static let dictationMode = "reed.settings.dictationMode"
         static let proofreadModel = "reed.settings.proofreadModel"
         static let proofreadStyle = "reed.settings.proofreadStyle"
+        static let meetingAutoMode = "reed.settings.meetingAutoMode"
+        static let meetingRetentionDays = "reed.settings.meetingRetentionDays"
     }
 
     /// The Keychain account the OpenAI key is stored under — see
@@ -110,6 +112,17 @@ final class Settings: ObservableObject {
         didSet { defaults.set(proofreadStyle.rawValue, forKey: Keys.proofreadStyle) }
     }
 
+    /// Meeting mode's always-listening variant. Off by default: recording
+    /// anything without being asked has to be the user's choice.
+    @Published var meetingAutoMode: Bool {
+        didSet { defaults.set(meetingAutoMode, forKey: Keys.meetingAutoMode) }
+    }
+
+    /// How long meeting transcripts are kept. 0 means forever.
+    @Published var meetingRetentionDays: Int {
+        didSet { defaults.set(meetingRetentionDays, forKey: Keys.meetingRetentionDays) }
+    }
+
     /// Whether the proofreading shortcut can do anything at all. Both
     /// halves are required, and neither has a usable fallback: without a
     /// key there is nothing to authenticate with, and without a model
@@ -142,6 +155,8 @@ final class Settings: ObservableObject {
             Keys.dictationMode: DictationMode.toggle.rawValue,
             Keys.proofreadModel: Self.defaultProofreadModel,
             Keys.proofreadStyle: ProofreadStyle.correct.rawValue,
+            Keys.meetingAutoMode: false,
+            Keys.meetingRetentionDays: 7,
         ])
 
         if defaults.object(forKey: Keys.inputDeviceID) != nil {
@@ -158,6 +173,8 @@ final class Settings: ObservableObject {
         } else {
             dictationMode = .toggle
         }
+        meetingAutoMode = defaults.bool(forKey: Keys.meetingAutoMode)
+        meetingRetentionDays = defaults.integer(forKey: Keys.meetingRetentionDays)
         proofreadModel =
             (defaults.object(forKey: Keys.proofreadModel) as? String) ?? Self.defaultProofreadModel
         if let raw = defaults.object(forKey: Keys.proofreadStyle) as? String,
