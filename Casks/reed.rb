@@ -10,7 +10,7 @@
 # Until then the DMG on the Releases page is the install path, and README.md
 # says so.
 cask "reed" do
-  version "0.1.0"
+  version "0.1.1"
   # Placeholder until a release exists: `shasum -a 256 Reed.dmg`.
   sha256 "0000000000000000000000000000000000000000000000000000000000000000"
 
