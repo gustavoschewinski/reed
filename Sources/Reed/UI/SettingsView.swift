@@ -87,7 +87,7 @@ struct SettingsView: View {
 
                 group("Shortcut") {
                     Field(title: "Dictation shortcut") {
-                        KeyboardShortcuts.Recorder(for: .dictate) { _ in
+                        ShortcutRecorder(for: .dictate) {
                             NotificationCenter.default.post(
                                 name: .reedShortcutDidChange, object: nil
                             )
@@ -121,7 +121,7 @@ struct SettingsView: View {
                             + "the spelling and grammar before pasting. Leave it unset if you "
                             + "only want plain dictation."
                     ) {
-                        KeyboardShortcuts.Recorder(for: .proofread)
+                        ShortcutRecorder(for: .proofread)
                     }
                     Rule()
                     Field(
@@ -197,7 +197,7 @@ struct SettingsView: View {
                         note: "Starts and stops recording a meeting: your microphone and what your Mac plays, "
                             + "transcribed on this Mac. Audio is never saved, only the text."
                     ) {
-                        KeyboardShortcuts.Recorder(for: .meeting)
+                        ShortcutRecorder(for: .meeting)
                     }
                     Rule()
                     Field(

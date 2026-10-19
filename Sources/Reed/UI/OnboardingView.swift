@@ -296,7 +296,7 @@ private struct HotkeyStepView: View {
                 Text("Dictation shortcut")
                     .foregroundColor(Theme.Window.textPrimary)
                 Spacer()
-                KeyboardShortcuts.Recorder(for: .dictate)
+                ShortcutRecorder(for: .dictate)
             }
             .padding(14)
             .background(Theme.Window.inkRaised)
