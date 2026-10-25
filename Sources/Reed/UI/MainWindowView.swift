@@ -229,7 +229,7 @@ private struct StatusFooter: View {
     /// Read through a static rather than computed inline, so the same
     /// expression seeds `@State` and refreshes it below.
     private static var currentShortcutLabel: String {
-        KeyboardShortcuts.getShortcut(for: .dictate)?.description ?? "Not set"
+        KeyboardShortcuts.getShortcut(for: .dictate)?.displayName ?? "Not set"
     }
 
     var body: some View {
