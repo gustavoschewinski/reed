@@ -45,7 +45,7 @@ struct ShortcutRecorder: View {
 
     private var label: String {
         if isRecording { return "Press shortcut…" }
-        return shortcut.map { String(describing: $0) } ?? "Record Shortcut"
+        return shortcut?.displayName ?? "Record Shortcut"
     }
 
     private func toggleRecording() {
@@ -93,6 +93,22 @@ struct ShortcutRecorder: View {
         KeyboardShortcuts.setShortcut(new, for: name)
         stopRecording()
         onChange?()
+    }
+}
+
+extension KeyboardShortcuts.Shortcut {
+    /// Stands in for `description`, which renders the Space key through the
+    /// package's SwiftPM resource bundle and hits the same fatalError as the
+    /// stock Recorder on any Mac but the build machine. Everything else
+    /// comes from the package.
+    @MainActor
+    var displayName: String {
+        guard key == .space else { return description }
+        let glyphs = [
+            (NSEvent.ModifierFlags.control, "⌃"), (.option, "⌥"),
+            (.shift, "⇧"), (.command, "⌘"),
+        ]
+        return glyphs.filter { modifiers.contains($0.0) }.map(\.1).joined() + "Space"
     }
 }
 
