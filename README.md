@@ -81,6 +81,8 @@ Press the meeting shortcut (**Option+-** by default) and Reed transcribes your m
 
 **Listen automatically** is off by default. When it's on, Reed transcribes speech your Mac plays, and joins your microphone only while another app is using it (a call). Silence and music are skipped. The menu bar icon turns red while you've started a meeting yourself.
 
+**Always use my microphone** (off by default, needs Listen automatically) keeps the microphone open all the time instead of only during calls, so conversations in the room are transcribed too, labelled "In person". macOS shows its microphone indicator the whole time, and Bluetooth headsets stay in call-quality audio.
+
 Transcripts are kept for 7 days by default. Pick 1 day, 30 days or forever in settings.
 
 To let Claude read your meetings, add Reed as an MCP server:

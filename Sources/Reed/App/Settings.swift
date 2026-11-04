@@ -34,6 +34,7 @@ final class Settings: ObservableObject {
         static let proofreadModel = "reed.settings.proofreadModel"
         static let proofreadStyle = "reed.settings.proofreadStyle"
         static let meetingAutoMode = "reed.settings.meetingAutoMode"
+        static let meetingAlwaysMic = "reed.settings.meetingAlwaysMic"
         static let meetingRetentionDays = "reed.settings.meetingRetentionDays"
     }
 
@@ -118,6 +119,14 @@ final class Settings: ObservableObject {
         didSet { defaults.set(meetingAutoMode, forKey: Keys.meetingAutoMode) }
     }
 
+    /// Auto mode keeps the microphone open all the time, not only while
+    /// another app holds it (a call), so conversations in the room are
+    /// transcribed too. Does nothing with auto mode off. Off by default:
+    /// it means a microphone indicator all day.
+    @Published var meetingAlwaysMic: Bool {
+        didSet { defaults.set(meetingAlwaysMic, forKey: Keys.meetingAlwaysMic) }
+    }
+
     /// How long meeting transcripts are kept. 0 means forever.
     @Published var meetingRetentionDays: Int {
         didSet { defaults.set(meetingRetentionDays, forKey: Keys.meetingRetentionDays) }
@@ -156,6 +165,7 @@ final class Settings: ObservableObject {
             Keys.proofreadModel: Self.defaultProofreadModel,
             Keys.proofreadStyle: ProofreadStyle.correct.rawValue,
             Keys.meetingAutoMode: false,
+            Keys.meetingAlwaysMic: false,
             Keys.meetingRetentionDays: 7,
         ])
 
@@ -174,6 +184,7 @@ final class Settings: ObservableObject {
             dictationMode = .toggle
         }
         meetingAutoMode = defaults.bool(forKey: Keys.meetingAutoMode)
+        meetingAlwaysMic = defaults.bool(forKey: Keys.meetingAlwaysMic)
         meetingRetentionDays = defaults.integer(forKey: Keys.meetingRetentionDays)
         proofreadModel =
             (defaults.object(forKey: Keys.proofreadModel) as? String) ?? Self.defaultProofreadModel

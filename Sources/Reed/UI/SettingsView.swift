@@ -212,6 +212,19 @@ struct SettingsView: View {
                     }
                     Rule()
                     Field(
+                        title: "Always use my microphone",
+                        note: "With Listen automatically on, keeps your microphone open all the time, not only "
+                            + "during calls, so conversations in the room are transcribed too. macOS shows the "
+                            + "microphone indicator the whole time."
+                    ) {
+                        Toggle("", isOn: $settings.meetingAlwaysMic)
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                            .disabled(!settings.meetingAutoMode)
+                            .accessibilityLabel("Always use my microphone")
+                    }
+                    Rule()
+                    Field(
                         title: "Keep transcripts for",
                         note: "Older transcripts are deleted automatically. Forever keeps them until you delete them."
                     ) {

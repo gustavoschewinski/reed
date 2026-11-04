@@ -277,11 +277,12 @@ final class MeetingController: ObservableObject {
         var available = false
         if #available(macOS 14.2, *) { available = true }
         let plan = MeetingPlanner.plan(CaptureInputs(
-            manualOn: manualOn, autoEnabled: settings.meetingAutoMode, systemAudioAvailable: available,
-            somethingPlaying: isPlaying(now), micInUseElsewhere: sources.micInUseElsewhere, dictating: dictating
+            manualOn: manualOn, autoEnabled: settings.meetingAutoMode, alwaysMic: settings.meetingAlwaysMic,
+            systemAudioAvailable: available, somethingPlaying: isPlaying(now),
+            micInUseElsewhere: sources.micInUseElsewhere, dictating: dictating
         ))
         if plan != lastLoggedPlan {
-            DebugLog.log("Meeting plan tap=\(plan.systemTap) mic=\(plan.mic) auto=\(settings.meetingAutoMode) manual=\(manualOn) playing=\(isPlaying(now)) call=\(sources.micInUseElsewhere) source=\(sources.current.app)")
+            DebugLog.log("Meeting plan tap=\(plan.systemTap) mic=\(plan.mic) auto=\(settings.meetingAutoMode) alwaysMic=\(settings.meetingAlwaysMic) manual=\(manualOn) playing=\(isPlaying(now)) call=\(sources.micInUseElsewhere) source=\(sources.current.app)")
             lastLoggedPlan = plan
         }
         if plan.systemTap { startSystem(now: now) } else { stopSystem() }

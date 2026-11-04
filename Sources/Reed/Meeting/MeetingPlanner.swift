@@ -62,6 +62,8 @@ struct SilenceWatchdog {
 struct CaptureInputs: Equatable {
     var manualOn: Bool
     var autoEnabled: Bool
+    /// Auto mode keeps the mic open even with no call.
+    var alwaysMic: Bool = false
     /// macOS 14.2+.
     var systemAudioAvailable: Bool
     /// Some other process reported output in the last 10 s (debounced by the controller).
@@ -78,11 +80,12 @@ struct CapturePlan: Equatable {
 /// What to capture, from what the user asked for and what the Mac is doing.
 /// Auto mode never opens the mic on its own — only while another app
 /// already holds it (a call) — so there is no all-day mic indicator and
-/// Bluetooth headsets aren't forced into call quality.
+/// Bluetooth headsets aren't forced into call quality. The exception is
+/// `alwaysMic`, which the user opts into knowing both.
 enum MeetingPlanner {
     static func plan(_ i: CaptureInputs) -> CapturePlan {
         let tap = i.systemAudioAvailable && (i.manualOn || (i.autoEnabled && i.somethingPlaying))
-        let mic = !i.dictating && (i.manualOn || (i.autoEnabled && i.micInUseElsewhere))
+        let mic = !i.dictating && (i.manualOn || (i.autoEnabled && (i.micInUseElsewhere || i.alwaysMic)))
         return CapturePlan(systemTap: tap, mic: mic)
     }
 }

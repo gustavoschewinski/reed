@@ -109,9 +109,9 @@ private func withList(_ sizes: [UInt32], _ body: (UnsafeMutableAudioBufferListPo
 
 // MARK: - MeetingPlanner
 
-private func inputs(manual: Bool = false, auto: Bool = false, available: Bool = true, playing: Bool = false,
-                    call: Bool = false, dictating: Bool = false) -> CaptureInputs {
-    CaptureInputs(manualOn: manual, autoEnabled: auto, systemAudioAvailable: available,
+private func inputs(manual: Bool = false, auto: Bool = false, alwaysMic: Bool = false, available: Bool = true,
+                    playing: Bool = false, call: Bool = false, dictating: Bool = false) -> CaptureInputs {
+    CaptureInputs(manualOn: manual, autoEnabled: auto, alwaysMic: alwaysMic, systemAudioAvailable: available,
                   somethingPlaying: playing, micInUseElsewhere: call, dictating: dictating)
 }
 
@@ -142,4 +142,16 @@ private func inputs(manual: Bool = false, auto: Bool = false, available: Bool = 
 
 @Test func autoOpensTheMicForACallEvenWithNothingPlaying() {
     #expect(MeetingPlanner.plan(inputs(auto: true, call: true)) == CapturePlan(systemTap: false, mic: true))
+}
+
+@Test func alwaysMicKeepsTheMicOpenInAutoModeWithoutACall() {
+    #expect(MeetingPlanner.plan(inputs(auto: true, alwaysMic: true)) == CapturePlan(systemTap: false, mic: true))
+}
+
+@Test func alwaysMicDoesNothingWithAutoModeOff() {
+    #expect(MeetingPlanner.plan(inputs(alwaysMic: true)) == CapturePlan(systemTap: false, mic: false))
+}
+
+@Test func alwaysMicStillYieldsTheMicToDictation() {
+    #expect(MeetingPlanner.plan(inputs(auto: true, alwaysMic: true, dictating: true)) == CapturePlan(systemTap: false, mic: false))
 }

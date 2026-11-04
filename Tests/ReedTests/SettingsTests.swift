@@ -101,10 +101,13 @@ import Testing
     let defaults = FakeUserDefaults()
     let settings = Settings(defaults: defaults, secrets: FakeSecretStore())
     #expect(settings.meetingAutoMode == false)
+    #expect(settings.meetingAlwaysMic == false)
     #expect(settings.meetingRetentionDays == 7)
     settings.meetingAutoMode = true
+    settings.meetingAlwaysMic = true
     settings.meetingRetentionDays = 30
     let reloaded = Settings(defaults: defaults, secrets: FakeSecretStore())
     #expect(reloaded.meetingAutoMode == true)
+    #expect(reloaded.meetingAlwaysMic == true)
     #expect(reloaded.meetingRetentionDays == 30)
 }
